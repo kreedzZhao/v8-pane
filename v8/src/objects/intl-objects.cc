@@ -2752,6 +2752,8 @@ class ICUTimezoneCache : public base::TimezoneCache {
 
   void Clear(TimeZoneDetection time_zone_detection) override;
 
+  void SetTimeZone(const char* iana_id) override;
+
  private:
   icu::TimeZone* GetTimeZone();
 
@@ -2759,6 +2761,10 @@ class ICUTimezoneCache : public base::TimezoneCache {
                   int32_t* dst_offset);
 
   icu::TimeZone* timezone_;
+
+  // Empty is the host's, which is what every embedder that never calls
+  // v8::Isolate::SetTimeZone keeps.
+  std::string zone_id_;
 
   std::string timezone_name_;
   std::string dst_timezone_name_;
@@ -2781,9 +2787,21 @@ const char* ICUTimezoneCache::LocalTimezone(double time_ms) {
 
 icu::TimeZone* ICUTimezoneCache::GetTimeZone() {
   if (timezone_ == nullptr) {
-    timezone_ = icu::TimeZone::createDefault();
+    // The pinned zone if this isolate has one, and only otherwise the process's.
+    timezone_ = zone_id_.empty()
+                    ? icu::TimeZone::createDefault()
+                    : icu::TimeZone::createTimeZone(
+                          icu::UnicodeString::fromUTF8(zone_id_));
   }
   return timezone_;
+}
+
+void ICUTimezoneCache::SetTimeZone(const char* iana_id) {
+  zone_id_ = iana_id == nullptr ? "" : iana_id;
+  // Drop what was computed under the old zone. kSkip, deliberately: redetecting
+  // would call icu::TimeZone::adoptDefault and put this isolate's zone into the
+  // process, which is exactly what SetTimeZone exists to stop doing.
+  Clear(TimeZoneDetection::kSkip);
 }
 
 bool ICUTimezoneCache::GetOffsets(double time_ms, bool is_utc,
@@ -2820,7 +2838,10 @@ void ICUTimezoneCache::Clear(TimeZoneDetection time_zone_detection) {
   timezone_ = nullptr;
   timezone_name_.clear();
   dst_timezone_name_.clear();
-  if (time_zone_detection == TimeZoneDetection::kRedetect) {
+  // A cache pinned to a zone redetects nothing: `adoptDefault` writes the
+  // *process's* default, so an isolate with its own zone would push it onto
+  // every other isolate on the way past -- the coupling SetTimeZone removes.
+  if (time_zone_detection == TimeZoneDetection::kRedetect && zone_id_.empty()) {
     icu::TimeZone::adoptDefault(icu::TimeZone::detectHostTimeZone());
   }
 }
@@ -3150,7 +3171,15 @@ std::string Intl::TimeZoneIdToString(const icu::UnicodeString& id) {
 std::string Intl::DefaultTimeZone() {
   icu::UnicodeString id;
   {
-    std::unique_ptr<icu::TimeZone> tz(icu::TimeZone::createDefault());
+    // Static, so the isolate has to be asked for rather than passed. Temporal is
+    // the only caller; going through the current isolate is what keeps it
+    // agreeing with `Date` and `Intl.DateTimeFormat` in the same isolate.
+    Isolate* isolate = Isolate::TryGetCurrent();
+    std::unique_ptr<icu::TimeZone> tz(
+        (isolate != nullptr && !isolate->time_zone().empty())
+            ? icu::TimeZone::createTimeZone(
+                  icu::UnicodeString::fromUTF8(isolate->time_zone()))
+            : icu::TimeZone::createDefault());
     tz->getID(id);
   }
   UErrorCode status = U_ZERO_ERROR;

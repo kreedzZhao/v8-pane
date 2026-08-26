@@ -48,6 +48,14 @@ class V8_EXPORT_PRIVATE DateCache {
   void ResetDateCache(
       base::TimezoneCache::TimeZoneDetection time_zone_detection);
 
+  // Pin this cache's zone rather than reading the host's. See
+  // v8::Isolate::SetTimeZone; the timezone cache is private, so this is how the
+  // isolate reaches it.
+  void SetTimeZone(const char* iana_id) {
+    tz_cache_->SetTimeZone(iana_id);
+    ResetDateCache(base::TimezoneCache::TimeZoneDetection::kSkip);
+  }
+
   // Computes floor(time_ms / kMsPerDay).
   static int DaysFromTime(int64_t time_ms) {
     if (time_ms < 0) time_ms -= (kMsPerDay - 1);

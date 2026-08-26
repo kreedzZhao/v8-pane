@@ -1844,6 +1844,30 @@ class V8_EXPORT Isolate {
       TimeZoneDetection time_zone_detection = TimeZoneDetection::kSkip);
 
   /**
+   * Pin this isolate to a time zone, by IANA identifier ("Europe/London"), or
+   * pass nullptr or "" to go back to the host's.
+   *
+   * **Per isolate, which the host default is not.** Without this the only way
+   * an embedder can choose a zone is to change the process's -- TZ, or ICU's
+   * default -- and then call DateTimeConfigurationChangeNotification. That is
+   * process-wide by construction, and it is worse than it looks when more than
+   * one isolate is alive: `Date` reaches the zone through the isolate's own
+   * DateCache, which latches at the notification, while `Intl.DateTimeFormat`
+   * reaches it through icu::TimeZone::createDefault() at every construction. So
+   * a second isolate's notification moves the first isolate's `Intl` and not its
+   * `Date`, and that isolate then reports two different zones through two
+   * surfaces -- while also reporting the other isolate's.
+   *
+   * An isolate with a zone set here reads neither the process's TZ nor ICU's
+   * default for either surface, and writes to neither. Isolates that never call
+   * it are unaffected in both directions.
+   *
+   * Takes effect immediately; cached date computations are reset the way
+   * DateTimeConfigurationChangeNotification resets them.
+   */
+  void SetTimeZone(const char* iana_id);
+
+  /**
    * Notification that the embedder has changed the locale. V8 keeps a cache of
    * various values used for locale computation. This notification will reset
    * those cached values for the current context so that locale configuration

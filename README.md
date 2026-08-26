@@ -1,3 +1,89 @@
+# v8-pane — rusty_v8 with a per-isolate time zone
+
+A fork of the published `v8` crate (152.1.0, V8 15.2.124.1), carrying two things
+upstream does not have. Upstream's own README follows below, unchanged.
+
+| | |
+|---|---|
+| `v8::Isolate::SetTimeZone` | a time zone that belongs to the isolate rather than to the process |
+| `v8::ObjectTemplate::MarkAsUndetectable` | public V8 API the crate simply does not bind |
+
+**An isolate that never calls `SetTimeZone` behaves exactly as before**, in both
+directions: it reads the host's zone, and no other isolate can move it.
+
+## Why this is a fork and not a patch applied by a script
+
+It used to be a `.patch` plus a shell script, reconstructed by hand on one
+machine. Three things were wrong with that, and the third is the one that decided
+it:
+
+1. Nothing could build it but that machine — the tree was not in git, and the
+   script needed a local Chromium checkout for the inputs crates.io excludes.
+2. A V8 roll meant replaying the patch by hand. `intl-objects.cc` is where it
+   drifts, and `patch` answers drift with `hunk FAILED` and no three-way merge.
+   Here, a roll is `git rebase --onto import/<new> import/<old> main`.
+3. An edit had already escaped the patch file. `build.rs` carried a better error
+   message for a missing archive that existed in exactly one working tree and in
+   no reproducible artifact.
+
+It is a fork of the **published tarball**, not of `denoland/rusty_v8`. Upstream
+keeps V8 itself in a submodule (`denoland/v8`, 1.05 GB) and assembles the rest
+through `v8/DEPS`; this patch spans both sides — seven files under `v8/` and three
+in rusty_v8's own `src/` and `build.rs` — so upstream's layout would split it
+across two forks, and cargo cannot shallow-clone a git dependency on stable,
+which would put that 1.05 GB in front of every clean CI job just to compile the
+Rust side.
+
+## Building it
+
+```bash
+bash pane-deps.sh    # the two inputs crates.io excludes, at the v8/DEPS revisions
+```
+
+Then, from the **embedder's** workspace (the one whose `[patch.crates-io]` points
+here):
+
+```bash
+RUSTY_V8_ARCHIVE= V8_FROM_SOURCE=1 cargo build --release
+cp target/release/gn_out/obj/librusty_v8.a <where the embedder keeps it>
+```
+
+The empty `RUSTY_V8_ARCHIVE` is required whenever the embedder sets it: leaving it
+set copies the stale archive back over what this build produced. Everything else
+the build needs — gn, ninja, clang, and the Rust toolchain that compiles the ICU4X
+crates — is downloaded by this crate's own `tools/*.py`. No depot_tools, no
+gclient, no Chromium checkout.
+
+The archive is **per target**, and the official prebuilt one is not a substitute:
+it does not have the added API, which is a link error at best.
+
+## Rolling V8 forward
+
+```bash
+git checkout -b import/<new> import/<old>
+# replace the working tree with the new crates.io tarball, commit, tag import/<new>
+git rebase --onto import/<new> import/<old> main
+cargo test -p pane-core --test time_zone_isolates   # the reason this fork exists
+```
+
+`v8/src/objects/intl-objects.cc` is the file to read the conflicts in carefully:
+the three places all of V8 reads ICU's process-global default are there, and one
+of them (`Clear(kRedetect)`) must keep *not* calling `adoptDefault` while pinned.
+
+## What is not here
+
+The bindings do not live in the embedder's own crate as an object file linked
+beside the archive. That works for anything reached through a `v8::Local` — a
+`Local` is the V8 pointer — which is how `MarkAsUndetectable` used to be done.
+It does not work for `v8::Isolate`: on the Rust side that is
+`struct Isolate(NonNull<RealIsolate>)`, a wrapper *holding* the pointer, so
+passing the wrapper's own address compiles, links, and then reads whatever
+follows it in memory. Measured: a null `date_cache_` and a segfault on the first
+field load. Only code inside this crate can do the conversion, through
+`pub(crate) Isolate::as_real_ptr`.
+
+---
+
 # Rusty V8 Binding
 
 V8 Version: 15.2.124.1

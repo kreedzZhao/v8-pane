@@ -1,0 +1,11 @@
+# What `pane-deps.sh` fetches. Pinned by `v8/DEPS` and 43 MB, so it is fetched
+# rather than carried -- the same rule that keeps this fork out of the embedder's
+# repository.
+/third_party/icu/common/*.dat
+/third_party/rust/chromium_crates_io/
+
+# What the crate's own build scripts download into the tree.
+/third_party/rust-toolchain/
+
+__pycache__/
+*.pyc

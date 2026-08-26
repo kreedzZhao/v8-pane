@@ -154,6 +154,8 @@ unsafe extern "C" {
 
   fn v8__ObjectTemplate__SetImmutableProto(this: *const ObjectTemplate);
 
+  fn v8__ObjectTemplate__MarkAsUndetectable(this: *const ObjectTemplate);
+
   fn v8__ObjectTemplate__SetCallAsFunctionHandler(
     this: *const ObjectTemplate,
     callback: FunctionCallback,
@@ -1069,6 +1071,25 @@ impl ObjectTemplate {
   #[inline(always)]
   pub fn set_immutable_proto(&self) {
     unsafe { v8__ObjectTemplate__SetImmutableProto(self) };
+  }
+
+  /// Instances of this template answer `typeof` with `"undefined"` and are
+  /// falsy, while remaining distinct from `undefined`.
+  ///
+  /// This is what `document.all` is, and there is nothing in JavaScript that
+  /// reproduces it: `typeof` on an ordinary object -- or on a `Proxy` -- never
+  /// says `"undefined"`. So an embedder that answers the member with `undefined`
+  /// passes `typeof document.all === 'undefined'` and fails both
+  /// `document.all !== undefined` and `String(document.all)`, which is a
+  /// one-line test for a real browser.
+  ///
+  /// The flag lives on the template, so it has to be set before an instance is
+  /// made from it. V8 also refuses it on a template with no call handler --
+  /// `Check failed: !IsUndefined(obj->GetInstanceCallHandler())` -- and is right
+  /// to: the object this models is callable.
+  #[inline(always)]
+  pub fn mark_as_undetectable(&self) {
+    unsafe { v8__ObjectTemplate__MarkAsUndetectable(self) };
   }
 
   /// Sets the callback to be used when calling instances created from this

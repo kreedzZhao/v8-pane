@@ -981,6 +981,24 @@ where
 /// filesystem, and subsequent builds would fail to overwrite it.
 fn copy_archive(url: &str, filename: &Path) {
   println!("Copying {url} to {filename:?}");
+  // Say what to do, rather than `Os { code: 2, kind: NotFound }` about a path the
+  // reader has no reason to recognise. This is the first thing a second machine
+  // hits: `RUSTY_V8_ARCHIVE` points at an archive built from *this* tree, which
+  // carries a patch, and no fresh clone has one yet.
+  if !Path::new(url).exists() {
+    let crate_dir = env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
+    panic!(
+      "RUSTY_V8_ARCHIVE points at {url}, which does not exist.\n\
+       \n\
+       This is a patched V8 (see {crate_dir}/README.md), so the official prebuilt\n\
+       archive is not a substitute -- it does not have the added API. Fetch the\n\
+       archive for this target from wherever the embedder publishes it, or build it:\n\
+       \n\
+       \x20   bash {crate_dir}/pane-deps.sh\n\
+       \x20   RUSTY_V8_ARCHIVE= V8_FROM_SOURCE=1 cargo build --release\n\
+       \x20   cp target/release/gn_out/obj/librusty_v8.a {url}\n"
+    );
+  }
   let mut src = fs::File::open(url).unwrap();
   let mut dst = fs::File::create(filename).unwrap();
 

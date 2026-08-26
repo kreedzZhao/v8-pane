@@ -11,12 +11,18 @@ name: Archive
 # Only Linux. The macOS arm64 asset is built on the maintainer's machine, where a warm
 # ccache turns 2-3 hours of runner time into about twelve minutes, and uploaded into the
 # same release; `v8-patch/README.md` in the embedder has those three commands.
+# **Every** push, with no path filter, because the consumer keys an archive by this
+# repository's commit rather than by the files that reach the archive. That key is
+# deliberate -- the list of inputs that reach a `librusty_v8.a` is long (this tree's
+# C++, `binding.cc`, the gn args in `build.rs`, the pinned clang and Rust toolchains,
+# the two revisions `v8/DEPS` names), and a content key that missed one would link a
+# V8 built from other sources *silently*, where an over-strict key merely fails. But
+# it means a commit with no release is a commit the consumer cannot use, so filtering
+# paths here would leave holes: a README-only commit would build nothing, publish
+# nothing, and strand anyone who pointed a submodule at it.
 on:
   push:
     branches: [main]
-    paths-ignore:
-      - README.md
-      - .gitignore
   workflow_dispatch:
 
 permissions:

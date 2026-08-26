@@ -180,6 +180,10 @@ name = "test_external_deserialize"
 path = "tests/test_external_deserialize.rs"
 
 [[test]]
+name = "test_pane_apis"
+path = "tests/test_pane_apis.rs"
+
+[[test]]
 name = "test_platform_atomics_pump_message_loop"
 path = "tests/test_platform_atomics_pump_message_loop.rs"
 

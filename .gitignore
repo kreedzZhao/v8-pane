@@ -7,5 +7,10 @@
 # What the crate's own build scripts download into the tree.
 /third_party/rust-toolchain/
 
+# A build run from inside this tree rather than from the embedder's workspace, which is
+# what `cargo test` here does.
+/target/
+/out/
+
 __pycache__/
 *.pyc

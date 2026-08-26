@@ -1557,7 +1557,9 @@ fn download_static_lib_binaries() {
   // candidate URLs, not for explicit overrides.
   let (urls, cache_key) =
     if let Ok(custom_archive) = env::var("RUSTY_V8_ARCHIVE") {
-      (archive_urls(&custom_archive, &gz_name, &lib_name), None)
+      let urls = archive_urls(&custom_archive, &gz_name, &lib_name);
+      explain_missing_archive(&custom_archive, &urls);
+      (urls, None)
     } else {
       (
         artifact_url_candidates(&gz_name),
@@ -1571,6 +1573,34 @@ fn download_static_lib_binaries() {
     &static_lib_path(),
     cache_key.as_deref(),
     expected_sha256.as_deref(),
+  );
+}
+
+/// Say what to do when `RUSTY_V8_ARCHIVE` names a local archive that is not there,
+/// rather than a list of `failed to open source archive` lines about paths the
+/// reader has no reason to recognise. This is the first thing a second machine
+/// hits: the variable points at an archive built from *this* tree, which carries a
+/// patch, and no fresh clone has one yet.
+///
+/// Checked here, once, over every candidate the value expands to -- not inside
+/// `copy_archive`, which upstream also calls for each candidate of a directory
+/// value (gzipped first, then plain), for the cargo-home cache and for its own
+/// download temp file, where a missing first candidate is not an error.
+fn explain_missing_archive(archive: &str, urls: &[String]) {
+  if urls.iter().any(|url| is_remote_url(url) || Path::new(url).exists()) {
+    return;
+  }
+  let crate_dir = env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
+  panic!(
+    "RUSTY_V8_ARCHIVE points at {archive}, which does not exist.\n\
+     \n\
+     This is a patched V8 (see {crate_dir}/README.md), so the official prebuilt\n\
+     archive is not a substitute -- it does not have the added API. Fetch the\n\
+     archive for this target from wherever the embedder publishes it, or build it:\n\
+     \n\
+     \x20   bash {crate_dir}/pane-deps.sh\n\
+     \x20   RUSTY_V8_ARCHIVE= V8_FROM_SOURCE=1 cargo build --release\n\
+     \x20   cp target/release/gn_out/obj/librusty_v8.a {archive}\n"
   );
 }
 

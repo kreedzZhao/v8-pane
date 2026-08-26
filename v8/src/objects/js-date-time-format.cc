@@ -2758,7 +2758,13 @@ MaybeDirectHandle<JSDateTimeFormat> JSDateTimeFormat::CreateDateTimeFormat(
       // b. Else
     } else {
       //    i. Set timeZone to SystemTimeZoneIdentifier().
-      tz.reset(icu::TimeZone::createDefault());
+      // This isolate's zone if it has one. Without this, `Date` follows the
+      // isolate (through its own DateCache) while `Intl` follows the process,
+      // so two isolates disagree and one reports the other's zone.
+      tz.reset(isolate->time_zone().empty()
+                   ? icu::TimeZone::createDefault()
+                   : icu::TimeZone::createTimeZone(icu::UnicodeString::fromUTF8(
+                         isolate->time_zone())));
     }
   } else {
     // a. If toLocaleStringTimeZone is present, throw a TypeError exception.

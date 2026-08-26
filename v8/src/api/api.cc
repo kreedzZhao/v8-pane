@@ -11240,6 +11240,25 @@ void v8::Isolate::DateTimeConfigurationChangeNotification(
 #endif  // V8_INTL_SUPPORT
 }
 
+void v8::Isolate::SetTimeZone(const char* iana_id) {
+  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(this);
+  EnterV8NoScriptNoExceptionScope api_scope(i_isolate);
+  i_isolate->set_time_zone(iana_id == nullptr ? "" : iana_id);
+  // Push it into the cache `Date` reads, then invalidate everything computed
+  // under the old zone -- the same set DateTimeConfigurationChangeNotification
+  // invalidates, because the same things are stale.
+  i_isolate->date_cache()->SetTimeZone(i_isolate->time_zone().c_str());
+  i_isolate->IncreaseDateCacheStampAndInvalidateProtector();
+#ifdef V8_INTL_SUPPORT
+  i_isolate->clear_cached_icu_object(
+      i::Isolate::ICUObjectCacheType::kDefaultSimpleDateFormat);
+  i_isolate->clear_cached_icu_object(
+      i::Isolate::ICUObjectCacheType::kDefaultSimpleDateFormatForTime);
+  i_isolate->clear_cached_icu_object(
+      i::Isolate::ICUObjectCacheType::kDefaultSimpleDateFormatForDate);
+#endif  // V8_INTL_SUPPORT
+}
+
 void v8::Isolate::LocaleConfigurationChangeNotification() {
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(this);
   ApiRuntimeCallStatsScope rcs_scope(

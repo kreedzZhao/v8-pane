@@ -1672,6 +1672,15 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
 
   void set_date_cache(DateCache* date_cache);
 
+  // The time zone this isolate is in, as an IANA identifier, or empty for the
+  // host's. **Per isolate, which the ICU default is not**: `Date` reaches the
+  // zone through this isolate's DateCache and `Intl` reaches it through
+  // icu::TimeZone::createDefault(), so two isolates in one process used to
+  // disagree -- one reporting the other's zone through Intl while its own Date
+  // answered its own. See v8::Isolate::SetTimeZone.
+  const std::string& time_zone() const { return time_zone_; }
+  void set_time_zone(const std::string& id) { time_zone_ = id; }
+
   // Cache stamp used for invalidating caches in JSDate.
   // We increment the stamp each time when the timezone information changes.
   // JSDate objects perform stamp check and invalidate their caches if
@@ -2704,6 +2713,9 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   // TerminateExecution exceptions.
   std::unordered_set<int32_t*> active_dynamic_regexp_result_vectors_;
   DateCache* date_cache_ = nullptr;
+  // Empty is "use the host's", which is what every embedder that does not call
+  // v8::Isolate::SetTimeZone gets, and is the pre-existing behaviour exactly.
+  std::string time_zone_;
   base::RandomNumberGenerator* random_number_generator_ = nullptr;
   base::RandomNumberGenerator* fuzzer_rng_ = nullptr;
   v8::Isolate::ReleaseCppHeapCallback release_cpp_heap_callback_ = nullptr;

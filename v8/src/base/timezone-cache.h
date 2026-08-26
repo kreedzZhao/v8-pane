@@ -40,6 +40,17 @@ class TimezoneCache {
   // Called when the local timezone changes
   virtual void Clear(TimeZoneDetection time_zone_detection) = 0;
 
+  // Pin this cache to an IANA zone instead of the host's, or pass an empty
+  // string to go back to the host's. Per cache, and a cache belongs to an
+  // isolate -- which is the whole point: the ICU default this otherwise reads
+  // is process-global, so one isolate cannot have a zone without giving every
+  // other isolate the same one.
+  //
+  // Default is a no-op so that caches which have no way to honour it (the
+  // non-ICU POSIX ones, which read the process environment) keep their existing
+  // behaviour rather than silently claiming a zone they do not have.
+  virtual void SetTimeZone(const char* iana_id) {}
+
   // Called when tearing down the isolate
   virtual ~TimezoneCache() = default;
 };

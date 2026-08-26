@@ -456,6 +456,10 @@ size_t v8__Isolate__CreateParams__SIZEOF() {
   return sizeof(v8::Isolate::CreateParams);
 }
 
+void v8__Isolate__SetTimeZone(v8::Isolate* isolate, const char* iana_id) {
+  isolate->SetTimeZone(iana_id);
+}
+
 void v8__Isolate__DateTimeConfigurationChangeNotification(
     v8::Isolate* isolate, v8::Isolate::TimeZoneDetection time_zone_detection) {
   isolate->DateTimeConfigurationChangeNotification(time_zone_detection);

@@ -775,6 +775,10 @@ unsafe extern "C" {
     isolate: *mut RealIsolate,
     callback: unsafe extern "C" fn(*const FunctionCallbackInfo),
   );
+  fn v8__Isolate__SetTimeZone(
+    isolate: *mut RealIsolate,
+    iana_id: *const std::ffi::c_char,
+  );
   fn v8__Isolate__DateTimeConfigurationChangeNotification(
     isolate: *mut RealIsolate,
     time_zone_detection: TimeZoneDetection,
@@ -1907,6 +1911,35 @@ impl Isolate {
         self.as_real_ptr(),
         time_zone_detection,
       );
+    }
+  }
+
+  /// Pin this isolate to a time zone by IANA identifier, or `None` for the
+  /// host's.
+  ///
+  /// **Per isolate, which the host default is not.** The argument is made where
+  /// the C++ declaration is, in `v8-isolate.h`; the short version is that
+  /// `date_time_configuration_change_notification` can only select a zone by
+  /// changing the *process's*, and that two live isolates then disagree with
+  /// themselves -- `Date` follows the isolate and `Intl` follows the process, so
+  /// one isolate reports another's zone through one surface and its own through
+  /// the other.
+  ///
+  /// An identifier V8 does not recognise resolves to UTC, which is ICU's own
+  /// behaviour for an unknown zone. One containing a NUL is refused rather than
+  /// truncated: truncating pins the isolate to a zone the caller did not name.
+  #[inline(always)]
+  pub fn set_time_zone(&mut self, iana_id: Option<&str>) {
+    match iana_id {
+      Some(id) => {
+        let Ok(id) = std::ffi::CString::new(id) else {
+          return;
+        };
+        unsafe { v8__Isolate__SetTimeZone(self.as_real_ptr(), id.as_ptr()) }
+      }
+      None => unsafe {
+        v8__Isolate__SetTimeZone(self.as_real_ptr(), std::ptr::null())
+      },
     }
   }
 

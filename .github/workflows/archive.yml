@@ -62,19 +62,26 @@ jobs:
       - name: Fetch the excluded inputs
         run: bash pane-deps.sh
 
-      # `build.rs` downloads this clang itself to compile V8, but bindgen needs its
-      # **libclang** and looks for that on `LIBCLANG_PATH` -- which nothing sets, so a
-      # runner with an older system clang builds all of V8 and then dies in `build_binding`.
-      # Measured: 64 minutes, then "Warning: LIBCLANG_PATH not set. Bindgen requires Clang
-      # 21.1+", then "Libc++ only supports Clang 21 and later".
+      # **Where bindgen's libclang comes from**, which took two failed builds to find.
       #
-      # Downloaded here rather than installed from apt, and into the same directory
-      # `build.rs` uses, so that bindgen runs against the exact compiler that built the
-      # archive rather than whatever LLVM the distribution has.
-      - name: Download the pinned clang, for bindgen
+      # `build_binding` runs bindgen after the archive is linked, and bindgen looks for a
+      # `libclang.so` on `LIBCLANG_PATH`. Nothing sets that: on macOS it finds Xcode's, and
+      # `build.rs` only downloads a libclang explicitly on Windows. So a Linux runner built
+      # all of V8 and died 64 minutes in with "Bindgen requires Clang 21.1+", and again with
+      # "couldn't find any valid shared libraries" -- because Chromium's *clang* package
+      # carries only `libclang_rt.*`, and its `libclang` package (both platforms, 30 KB) is
+      # nothing but Python bindings.
+      #
+      # It is in the **Rust toolchain** package, which a source build downloads anyway for
+      # the ICU4X crates: `third_party/rust-toolchain/lib/libclang.so`. Fetched here rather
+      # than installed from apt so bindgen uses the toolchain this tree pins instead of
+      # whatever LLVM the distribution carries, and listed so that a layout change fails in
+      # ten seconds rather than after an hour of compiling.
+      - name: Download the pinned Rust toolchain, for bindgen's libclang
         run: |
-          python3 tools/clang/scripts/update.py --output-dir "$PWD/target/release/clang"
-          echo "LIBCLANG_PATH=$PWD/target/release/clang/lib" >> "$GITHUB_ENV"
+          python3 tools/rust_toolchain.py
+          ls -l third_party/rust-toolchain/lib/libclang*
+          echo "LIBCLANG_PATH=$PWD/third_party/rust-toolchain/lib" >> "$GITHUB_ENV"
 
       # Build and gate in one step, so that what gets published is what was tested.
       # `test_pane_apis` is why this fork exists; `test_api` is upstream's own 292 cases,

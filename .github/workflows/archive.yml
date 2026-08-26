@@ -1,0 +1,89 @@
+name: Archive
+
+# Builds this fork from source and publishes the static library as a release asset.
+#
+# **It lives here rather than in the embedder** because the event that invalidates an
+# archive is a push to *this* repository, and only this repository sees it. From the
+# embedder's side the chain was "push here, bump the submodule there, remember to dispatch"
+# -- and forgetting the last step left a stale archive to be caught downstream instead of
+# never existing.
+#
+# Only Linux. The macOS arm64 asset is built on the maintainer's machine, where a warm
+# ccache turns 2-3 hours of runner time into about twelve minutes, and uploaded into the
+# same release; `v8-patch/README.md` in the embedder has those three commands.
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - README.md
+      - .gitignore
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# A superseded build is worth nothing: the tag it would publish under names the commit
+# that is no longer main.
+concurrency:
+  group: archive-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TARGET: x86_64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+
+      # ccache because `build.rs` picks it up off the PATH by itself, and libglib2.0-dev
+      # because `build/config/linux/pkg_config.gni` runs pkg-config for glib during
+      # `gn gen` -- measured: without it the build dies in under two minutes with
+      # "Package 'glib-2.0', required by 'virtual:world', not found".
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y ccache libglib2.0-dev
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-${{ runner.os }}-${{ github.sha }}
+          restore-keys: ccache-${{ runner.os }}-
+
+      # The two inputs crates.io excludes, at the revisions `v8/DEPS` pins.
+      - name: Fetch the excluded inputs
+        run: bash pane-deps.sh
+
+      # Build and gate in one step, so that what gets published is what was tested.
+      # `test_pane_apis` is why this fork exists; `test_api` is upstream's own 292 cases,
+      # which is what would catch a patch that builds and breaks V8 somewhere else.
+      - name: Build from source and test
+        run: |
+          V8_FROM_SOURCE=1 cargo test --release --test test_pane_apis
+          V8_FROM_SOURCE=1 cargo test --release --test test_api
+
+      - name: Publish
+        run: |
+          set -euo pipefail
+          TAG="v8-152.1.0-$(git rev-parse --short=8 HEAD)"
+          ASSET="librusty_v8_${TARGET}.a.gz"
+          gzip -c target/release/gn_out/obj/librusty_v8.a > "/tmp/$ASSET"
+          ls -lh "/tmp/$ASSET"
+
+          # Provenance in the notes: the archive cannot say which pinned inputs went into
+          # it, and those come from v8/DEPS rather than from anything written by hand.
+          deps=$(python3 -c 'import sys; sys.path.insert(0, "tools"); from v8_deps import deps; print("\n".join("- %s %s" % (k, deps[k]) for k in ("third_party/icu", "third_party/rust")))')
+          {
+            echo "Patched V8 built from $GITHUB_SHA."
+            echo
+            echo "Inputs fetched by pane-deps.sh, at the revisions v8/DEPS pins:"
+            echo "$deps"
+            echo
+            echo "The macOS arm64 asset, when present, was built locally and uploaded here."
+          } > /tmp/notes.md
+
+          gh release create "$TAG" --title "$TAG" --notes-file /tmp/notes.md --target "$GITHUB_SHA" \
+            || echo "release $TAG already exists, uploading into it"
+          gh release upload "$TAG" "/tmp/$ASSET" --clobber

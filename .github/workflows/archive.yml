@@ -62,6 +62,20 @@ jobs:
       - name: Fetch the excluded inputs
         run: bash pane-deps.sh
 
+      # `build.rs` downloads this clang itself to compile V8, but bindgen needs its
+      # **libclang** and looks for that on `LIBCLANG_PATH` -- which nothing sets, so a
+      # runner with an older system clang builds all of V8 and then dies in `build_binding`.
+      # Measured: 64 minutes, then "Warning: LIBCLANG_PATH not set. Bindgen requires Clang
+      # 21.1+", then "Libc++ only supports Clang 21 and later".
+      #
+      # Downloaded here rather than installed from apt, and into the same directory
+      # `build.rs` uses, so that bindgen runs against the exact compiler that built the
+      # archive rather than whatever LLVM the distribution has.
+      - name: Download the pinned clang, for bindgen
+        run: |
+          python3 tools/clang/scripts/update.py --output-dir "$PWD/target/release/clang"
+          echo "LIBCLANG_PATH=$PWD/target/release/clang/lib" >> "$GITHUB_ENV"
+
       # Build and gate in one step, so that what gets published is what was tested.
       # `test_pane_apis` is why this fork exists; `test_api` is upstream's own 292 cases,
       # which is what would catch a patch that builds and breaks V8 somewhere else.

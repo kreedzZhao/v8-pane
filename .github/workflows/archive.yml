@@ -76,7 +76,21 @@ jobs:
         run: |
           apt-get update -qq
           apt-get install -y -qq --no-install-recommends \
-            build-essential python3 curl ca-certificates git pkg-config libglib2.0-dev xz-utils
+            build-essential python3 curl ca-certificates git pkg-config libglib2.0-dev \
+            xz-utils ccache
+
+      # **Because a failure after the compile costs an hour.** `build.rs` picks ccache up off
+      # the PATH by itself, and this job has now failed twice in its last mile -- once on
+      # bindgen's libclang, once on bindgen's builtin headers -- each time discarding a
+      # complete V8 build. The cache is keyed loosely on purpose: any hit at all turns the
+      # retry from an hour into minutes.
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: /github/home/.cache/ccache
+          key: ccache-v8-${{ github.sha }}
+          restore-keys: |
+            ccache-v8-
 
       # No rust in this image, and rustup honours the tree's `rust-toolchain.toml`.
       - name: Install Rust
@@ -108,6 +122,12 @@ jobs:
           python3 tools/rust_toolchain.py
           ls -l third_party/rust-toolchain/lib/libclang*
           echo "LIBCLANG_PATH=$PWD/third_party/rust-toolchain/lib" >> "$GITHUB_ENV"
+          # A libclang is not a clang: it carries no **resource directory**, so the builtin
+          # headers are missing and `build_binding`'s bindgen dies on
+          # "third_party/libc++/src/include/stddef.h: 'stddef.h' file not found" -- after V8
+          # itself has compiled, 2358 of 2384 targets in, which is the expensive place to
+          # find out. `stddef.h` is a freestanding compiler header, so gcc's copy answers it.
+          echo "BINDGEN_EXTRA_CLANG_ARGS=-I$(ls -d /usr/lib/gcc/x86_64-linux-gnu/*/include | head -1)" >> "$GITHUB_ENV"
 
       # Build and gate in one step, so that what gets published is what was tested.
       # `test_pane_apis` is why this fork exists; `test_api` is upstream's own 292 cases,

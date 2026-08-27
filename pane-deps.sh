@@ -73,7 +73,9 @@ fetch_subtree() {
   # shellcheck disable=SC2064
   trap "rm -rf '$tmp'" RETURN
   echo "fetching $path.tar.gz"
-  curl -fSL --retry 3 --no-progress-meter -o "$tmp/a.tar.gz" "$url/+archive/$rev/$path.tar.gz"
+  # `-sS` and not `--no-progress-meter`: the latter is curl 7.67, and manylinux_2_28 --
+  # where the Linux archive is built, for its glibc -- ships 7.61.
+  curl -fsSL --retry 3 -o "$tmp/a.tar.gz" "$url/+archive/$rev/$path.tar.gz"
   mkdir -p "$dest"
   tar xzf "$tmp/a.tar.gz" -C "$dest"
 }

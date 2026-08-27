@@ -80,6 +80,19 @@ jobs:
       # No `GH_TOKEN` here any more: this job builds and no longer publishes, so the token
       # belongs to the job that needs it rather than to the one that runs the compiler.
       TARGET: x86_64-unknown-linux-gnu
+      # **Why the ccache was doing nothing**, measured 2026-08-27 rather than reasoned: the run
+      # restored a 166 MB entry saved by an *identical* source tree, compiled for 70 minutes --
+      # the same 70 minutes the fully cold run took -- and saved a 332 MB entry afterwards.
+      # Exactly twice 166 MB is the signature of total miss: the restored half was never read
+      # and an equal new half was written beside it.
+      #
+      # ccache's default `compiler_check` is **mtime**, so the hash of every compilation
+      # includes the compiler binary's size and modification time. The pinned clang is
+      # downloaded fresh by `build_v8` on every run into `target/`, which is not cached, so its
+      # mtime is new every time and every one of ~2400 objects misses. `content` hashes the
+      # compiler's bytes instead: same clang, same hash, and the retry after a late failure
+      # costs minutes instead of the hour that has now been paid five times.
+      CCACHE_COMPILERCHECK: content
     steps:
       - uses: actions/checkout@v4
 
@@ -158,7 +171,22 @@ jobs:
           echo "BINDGEN_EXTRA_CLANG_ARGS=-isystem$resource/include" >> "$GITHUB_ENV"
 
       - name: Build from source
-        run: V8_FROM_SOURCE=1 cargo build --release -p v8
+        run: |
+          ccache -z
+          V8_FROM_SOURCE=1 cargo build --release -p v8
+
+      # **Because "is the cache working" was guesswork, and guessing cost an hour a round.**
+      # The evidence available from outside a run is the cache entry's size and the restore
+      # step's duration, and neither answers the question: 2026-08-27 restored a 166 MB entry
+      # saved by an identical source tree in 2 seconds, and then compiled for over an hour --
+      # which is what a cache full of misses looks like from here, and also what a working
+      # cache plus a slow link looks like. `ccache -s` distinguishes them in one line.
+      #
+      # Its own step with `if: always()` so a failed build still reports, since a failed build
+      # is exactly when the number matters.
+      - name: ccache statistics
+        if: always()
+        run: ccache -s
 
       # **Saved even when the build failed**, which is the point of it being its own step.
       # Every failure this job has had came after the compile -- twice in bindgen, once in
@@ -225,6 +253,9 @@ jobs:
       # of those saves an empty directory and reports success. Naming it makes the two agree.
       # `/Users/runner` is `$HOME` on this image; job-level `env` cannot expand it.
       CCACHE_DIR: /Users/runner/.ccache
+      # Same reason as the Linux job: the pinned clang is re-downloaded every run, so an
+      # mtime-based compiler check misses everything. See that job's comment for the numbers.
+      CCACHE_COMPILERCHECK: content
     # Same reasoning as the Linux job, for free: macOS runners default to bash already, but a
     # `sh` default is exactly the kind of thing that differs between images.
     defaults:
@@ -256,8 +287,40 @@ jobs:
       - name: Fetch the excluded inputs
         run: bash pane-deps.sh
 
+      # **The same failure as Linux, in the same place, and this comment used to claim the
+      # opposite.** It said bindgen finds Xcode's libclang on macOS "which is precisely why the
+      # two failures that cost this workflow two hours were Linux-only". It does find one, and
+      # on this image it is too old: 2026-08-27 the build died in bindgen with
+      # `attribute '__visibility__' is not supported by '#pragma clang attribute'` out of
+      # `third_party/libc++/src/include/*`, under a warning that says what it means --
+      # "Libc++ only supports AppleClang 26.4 and later". The maintainer's Mac builds because
+      # its Xcode is newer, which is why the local recipe never needed this.
+      #
+      # The fix is the Linux one, minus a step. `LIBCLANG_PATH` points at the pinned Rust
+      # toolchain's `libclang.dylib` -- Chromium's own, so new enough for Chromium's libc++ by
+      # construction. **No `BINDGEN_EXTRA_CLANG_ARGS` here**: `build.rs` takes the
+      # `target_os == "macos"` branch, which passes `-isysroot $(xcrun --show-sdk-path)` and
+      # never looks for a `clang` binary beside `LIBCLANG_PATH`, so the missing-`stddef.h`
+      # trap that cost Linux two attempts does not exist on this side.
+      #
+      # Verified locally before pushing, which is the part that was missing from the last five
+      # attempts: with a warm `gn_out`, `V8_FROM_SOURCE=1 cargo build -p v8` reaches
+      # `build_binding` in seconds, and with this `LIBCLANG_PATH` it regenerated
+      # `gn_out/src_binding.rs` instead of failing.
+      - name: Point bindgen at the pinned libclang
+        run: |
+          python3 tools/rust_toolchain.py
+          ls -l third_party/rust-toolchain/lib/libclang.dylib
+          echo "LIBCLANG_PATH=$PWD/third_party/rust-toolchain/lib" >> "$GITHUB_ENV"
+
       - name: Build from source
-        run: V8_FROM_SOURCE=1 cargo build --release -p v8
+        run: |
+          ccache -z
+          V8_FROM_SOURCE=1 cargo build --release -p v8
+
+      - name: ccache statistics
+        if: always()
+        run: ccache -s
 
       - name: Save ccache
         if: always()
@@ -312,6 +375,13 @@ jobs:
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
+          # **`gh` needs to be told which repository**, because this job has no `checkout` and
+          # therefore no `.git` -- and `gh release` infers the repo from git remotes. 2026-08-27
+          # it failed with `failed to run git: fatal: not a git repository` while the finished
+          # 39 MB Linux asset sat in `dist/` beside it. Stated rather than checked out: this job
+          # wants the assets, not the source, and a 200 MB clone to satisfy an inference is the
+          # wrong fix.
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           # **`${GITHUB_SHA:0:8}` and not `git rev-parse --short=8`**, which is what this said
@@ -341,7 +411,15 @@ jobs:
             for asset in $assets; do echo "- $(basename "$asset")"; done
           } > /tmp/notes.md
 
-          gh release create "$TAG" --title "$TAG" --notes-file /tmp/notes.md --target "$GITHUB_SHA" \
-            || echo "release $TAG already exists, uploading into it"
+          # **`view` first, rather than `create || echo "it already exists"`.** That `||` is how
+          # the git error above got reported as "release already exists, uploading into it" --
+          # it assumed the only way `create` can fail is that the tag is taken, so a real
+          # failure printed a reassuring and false reason and the step died two lines later
+          # with no explanation. Asking makes the two cases distinguishable.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG exists; uploading into it"
+          else
+            gh release create "$TAG" --title "$TAG" --notes-file /tmp/notes.md --target "$GITHUB_SHA"
+          fi
           # One call, both assets: `upload` takes a list, and --clobber makes a re-run idempotent.
           gh release upload "$TAG" $assets --clobber

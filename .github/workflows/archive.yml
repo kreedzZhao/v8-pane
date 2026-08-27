@@ -8,9 +8,13 @@ name: Archive
 # -- and forgetting the last step left a stale archive to be caught downstream instead of
 # never existing.
 #
-# Only Linux. The macOS arm64 asset is built on the maintainer's machine, where a warm
-# ccache turns 2-3 hours of runner time into about twelve minutes, and uploaded into the
-# same release; `v8-patch/README.md` in the embedder has those three commands.
+# **Both platforms, as of 2026-08-27.** The macOS arm64 asset used to be built on the
+# maintainer's machine and uploaded by hand -- a warm local ccache is about twelve minutes
+# against 2-3 hours of runner time -- and the cost of that was not the minutes: a fork commit
+# could publish a release carrying only the Linux asset, while `fetch-archive.sh` asks for the
+# asset *in the release named by the current submodule commit*. Whoever was on a Mac found out,
+# and only on a clean clone.
+#
 # **Every** push, with no path filter, because the consumer keys an archive by this
 # repository's commit rather than by the files that reach the archive. That key is
 # deliberate -- the list of inputs that reach a `librusty_v8.a` is long (this tree's
@@ -59,19 +63,32 @@ jobs:
     # toolchain. Debian 11 satisfies both ends -- glibc 2.31 and GLIBCXX 3.4.28 -- and 2.31
     # is exactly the base this archive has to run on.
     container: debian:bullseye
+    # **A container job's default shell is `sh`, and on Debian that is dash.** Which cost a
+    # whole build: `Publish` opens with `set -euo pipefail`, dash answers `set: Illegal option
+    # -o pipefail`, and the step failed *after* 72 minutes of compiling with the finished
+    # 38 MB archive sitting on the runner, about to be deleted with it. Nothing earlier caught
+    # it because every other step happens to be dash-clean, so the one bashism in the job was
+    # also the last thing to run.
+    #
+    # Set for the job rather than for that step: the next bashism should fail in seconds, not
+    # after an hour of ccache-cold V8.
+    defaults:
+      run:
+        shell: bash
     timeout-minutes: 350
     env:
-      GH_TOKEN: ${{ github.token }}
+      # No `GH_TOKEN` here any more: this job builds and no longer publishes, so the token
+      # belongs to the job that needs it rather than to the one that runs the compiler.
       TARGET: x86_64-unknown-linux-gnu
     steps:
       - uses: actions/checkout@v4
 
       # `libglib2.0-dev` because `build/config/linux/pkg_config.gni` runs pkg-config for glib
       # during `gn gen` -- measured: without it the build dies in under two minutes with
-      # "Package 'glib-2.0', required by 'virtual:world', not found". `git` because a
-      # container job's checkout falls back to a tarball without it, and the Publish step
-      # below reads `git rev-parse` for the tag. gn, ninja, clang and the Rust toolchain are
-      # downloaded by the crate itself.
+      # "Package 'glib-2.0', required by 'virtual:world', not found". `git` because a container
+      # job's checkout falls back to downloading a tarball without it, which leaves no `.git`
+      # -- not `pane-deps.sh`, which fetches subtree archives over curl on purpose. gn, ninja,
+      # clang and the Rust toolchain are downloaded by the crate itself.
       - name: Install build dependencies
         run: |
           apt-get update -qq
@@ -162,26 +179,169 @@ jobs:
           V8_FROM_SOURCE=1 cargo test --release --test test_pane_apis
           V8_FROM_SOURCE=1 cargo test --release --test test_api
 
+      # Compressed and handed off as an artifact, and **that is the point of the split**: an
+      # artifact outlives a failed publish. Every failure this job has had landed after the
+      # compile, and the last one -- one dash-incompatible `set -o pipefail` -- discarded a
+      # finished 38 MB archive that had already passed its tests. Now the bytes survive the
+      # run whatever the release step does, and are downloadable from it by hand.
+      - name: Package the archive
+        run: |
+          mkdir -p dist
+          gzip -c target/release/gn_out/obj/librusty_v8.a > "dist/librusty_v8_${TARGET}.a.gz"
+          ls -lh "dist/librusty_v8_${TARGET}.a.gz"
+
+          # Provenance beside the bytes: the archive cannot say which pinned inputs went into
+          # it, and those come from v8/DEPS rather than from anything written by hand. Read
+          # here because this is the job that has the tree; the release notes are written in
+          # the next one, which does not.
+          python3 -c 'import sys; sys.path.insert(0, "tools"); from v8_deps import deps; print("\n".join("- %s %s" % (k, deps[k]) for k in ("third_party/icu", "third_party/rust")))' > dist/deps.txt
+          cat dist/deps.txt
+
+      # In the workspace rather than `/tmp`, because the workspace is the directory both the
+      # container and the artifact action agree about.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: archive-x86_64-unknown-linux-gnu
+          path: dist/
+          retention-days: 7
+
+  # **The macOS arm64 archive, which used to be built by hand.** `v8-patch/README.md` carried a
+  # four-step recipe ending in `gh release upload`, and the cost of that was not the twelve
+  # minutes it takes on a warm local ccache: it was that a fork commit could be pushed, build a
+  # Linux archive, publish a release, and leave the macOS asset behind at the previous commit --
+  # while `fetch-archive.sh` asks for the asset *in the release named by the current commit*.
+  # The failure is per-developer and silent until someone on a Mac runs a clean clone.
+  #
+  # It is slower here than locally -- the doc's own measurement is 2-3 hours against about
+  # forty minutes cold on ten cores -- because the hosted runner has fewer of them. Free, since
+  # the fork is public, and cached, so only the first one pays in full.
+  macos:
+    runs-on: macos-15
+    env:
+      TARGET: aarch64-apple-darwin
+      # **Stated rather than inferred.** ccache 4 picks its directory from a chain that differs
+      # by platform -- `CCACHE_DIR`, then `$XDG_CACHE_HOME/ccache`, then `~/Library/Caches/ccache`
+      # on macOS and `~/.cache/ccache` elsewhere -- and a cache action pointed at the wrong one
+      # of those saves an empty directory and reports success. Naming it makes the two agree.
+      # `/Users/runner` is `$HOME` on this image; job-level `env` cannot expand it.
+      CCACHE_DIR: /Users/runner/.ccache
+    # Same reasoning as the Linux job, for free: macOS runners default to bash already, but a
+    # `sh` default is exactly the kind of thing that differs between images.
+    defaults:
+      run:
+        shell: bash
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      # Much shorter than the Linux job's list, and the absences are the interesting part.
+      # No container, because nothing here has to link against an old glibc -- that constraint
+      # is about the machines `pane-cli` runs on, and they are Linux. No rustup, because the
+      # image ships Rust and honours `rust-toolchain.toml`. No pinned clang and no
+      # `LIBCLANG_PATH`: bindgen finds Xcode's libclang on macOS, which is precisely why the
+      # two failures that cost this workflow two hours were Linux-only.
+      # `brew list ||` because the image may already carry it, and a bare `brew install`
+      # on an installed formula is a failure on some images and a warning on others.
+      - name: Install ccache
+        run: brew list ccache >/dev/null 2>&1 || brew install ccache
+
+      - name: Restore ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: /Users/runner/.ccache
+          key: ccache-v8-macos-${{ github.sha }}
+          restore-keys: |
+            ccache-v8-macos-
+
+      - name: Fetch the excluded inputs
+        run: bash pane-deps.sh
+
+      - name: Build from source
+        run: V8_FROM_SOURCE=1 cargo build --release -p v8
+
+      - name: Save ccache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: /Users/runner/.ccache
+          key: ccache-v8-macos-${{ github.sha }}
+
+      - name: Test the archive
+        run: |
+          V8_FROM_SOURCE=1 cargo test --release --test test_pane_apis
+          V8_FROM_SOURCE=1 cargo test --release --test test_api
+
+      # No `deps.txt` here: both jobs would read the same two revisions out of the same
+      # `v8/DEPS` at the same commit, and two artifacts carrying the same filename would race
+      # to overwrite each other in the publish job's merge. One writer, no ambiguity.
+      - name: Package the archive
+        run: |
+          mkdir -p dist
+          gzip -c target/release/gn_out/obj/librusty_v8.a > "dist/librusty_v8_${TARGET}.a.gz"
+          ls -lh "dist/librusty_v8_${TARGET}.a.gz"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: archive-aarch64-apple-darwin
+          path: dist/
+          retention-days: 7
+
+  # **A third job, on the runner image, for one reason: `gh`.** It is not in `debian:bullseye`
+  # and not in Debian 11's repositories, so `gh release create` inside the container fails --
+  # which would have been the *next* hour lost, right behind the dash one. The runner image has
+  # it, and publishing needs no old glibc; only compiling does.
+  publish:
+    needs: [linux, macos]
+    runs-on: ubuntu-24.04
+    # **`!cancelled()` rather than the default, so one platform cannot hold the other's
+    # release.** With a plain `needs`, a macOS failure would leave a finished, tested Linux
+    # archive unpublished -- the same shape as the dash failure, one job further out. So this
+    # runs whenever either build got far enough to leave an artifact, and publishes what is
+    # there. Whether both are present is a question about the release, and the release answers
+    # it: `fetch-archive.sh` fails loudly on a missing asset for the platform it is on.
+    if: ${{ !cancelled() }}
+    steps:
+      # `pattern` + `merge-multiple`, and no `name`: whichever builds succeeded left an
+      # artifact, and a missing one is not an error here.
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: archive-*
+          merge-multiple: true
+          path: dist
+
       - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          TAG="v8-152.1.0-$(git rev-parse --short=8 HEAD)"
-          ASSET="librusty_v8_${TARGET}.a.gz"
-          gzip -c target/release/gn_out/obj/librusty_v8.a > "/tmp/$ASSET"
-          ls -lh "/tmp/$ASSET"
+          # **`${GITHUB_SHA:0:8}` and not `git rev-parse --short=8`**, which is what this said
+          # and is not the same function: `--short=8` returns *at least* eight characters and
+          # lengthens on ambiguity, while the consumer asks for a plain eight-character prefix
+          # (`v8-patch/fetch-archive.sh`: `${FORK_SHA:0:8}`). They agree today by luck. The day
+          # a prefix collides they would disagree, and the symptom would be a release nobody
+          # can find rather than anything about V8.
+          TAG="v8-152.1.0-${GITHUB_SHA:0:8}"
 
-          # Provenance in the notes: the archive cannot say which pinned inputs went into
-          # it, and those come from v8/DEPS rather than from anything written by hand.
-          deps=$(python3 -c 'import sys; sys.path.insert(0, "tools"); from v8_deps import deps; print("\n".join("- %s %s" % (k, deps[k]) for k in ("third_party/icu", "third_party/rust")))')
+          # What actually arrived. Empty means both builds failed, and saying so beats
+          # publishing an empty release for a commit the consumer will then ask assets of.
+          assets=$(ls dist/librusty_v8_*.a.gz 2>/dev/null || true)
+          if [ -z "$assets" ]; then
+            echo "no archive was built for any platform; nothing to publish" >&2
+            exit 1
+          fi
+          ls -lh $assets
+
           {
             echo "Patched V8 built from $GITHUB_SHA."
             echo
             echo "Inputs fetched by pane-deps.sh, at the revisions v8/DEPS pins:"
-            echo "$deps"
+            cat dist/deps.txt 2>/dev/null || echo "- (the Linux job did not get far enough to read them)"
             echo
-            echo "The macOS arm64 asset, when present, was built locally and uploaded here."
+            echo "Assets in this release:"
+            for asset in $assets; do echo "- $(basename "$asset")"; done
           } > /tmp/notes.md
 
           gh release create "$TAG" --title "$TAG" --notes-file /tmp/notes.md --target "$GITHUB_SHA" \
             || echo "release $TAG already exists, uploading into it"
-          gh release upload "$TAG" "/tmp/$ASSET" --clobber
+          # One call, both assets: `upload` takes a list, and --clobber makes a re-run idempotent.
+          gh release upload "$TAG" $assets --clobber

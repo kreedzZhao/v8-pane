@@ -47,11 +47,18 @@ jobs:
     # different symbol *name* rather than a symbol *version* -- which is how an archive can
     # look portable and not be.
     #
-    # Building on 2.28 fixes it in the direction that composes: an archive built against an
-    # old glibc links on new ones too, so this stays one artifact rather than one per distro.
-    # manylinux_2_28 because it is the base every Python wheel targets anyway, which is where
-    # this archive is headed.
-    container: quay.io/pypa/manylinux_2_28_x86_64
+    # Building against an old glibc fixes it in the direction that composes: an archive built
+    # on an old one links on new ones too, so this stays one artifact rather than one per
+    # distribution.
+    #
+    # **Debian 11 and not manylinux_2_28**, which was the first attempt and fails from the
+    # other side. Chromium's *prebuilt* Rust toolchain -- the `bindgen` a V8 source build
+    # runs -- needs `GLIBCXX_3.4.26`, and manylinux deliberately keeps its libstdc++ old so
+    # that wheels stay compatible: AlmaLinux 8 has 3.4.25 and carries no newer runtime, not
+    # even under `gcc-toolset-14`. So it is old enough for the target and too old for the
+    # toolchain. Debian 11 satisfies both ends -- glibc 2.31 and GLIBCXX 3.4.28 -- and 2.31
+    # is exactly the base this archive has to run on.
+    container: debian:bullseye
     timeout-minutes: 350
     env:
       GH_TOKEN: ${{ github.token }}
@@ -59,13 +66,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # `glib2-devel` because `build/config/linux/pkg_config.gni` runs pkg-config for glib
-      # during `gn gen` -- measured on the runner's own image: without it the build dies in
-      # under two minutes with "Package 'glib-2.0', required by 'virtual:world', not found".
-      # The image already carries python3, curl, git, gcc-toolset-14, cmake and perl; gn,
-      # ninja, clang and the Rust toolchain are downloaded by the crate itself.
+      # `libglib2.0-dev` because `build/config/linux/pkg_config.gni` runs pkg-config for glib
+      # during `gn gen` -- measured: without it the build dies in under two minutes with
+      # "Package 'glib-2.0', required by 'virtual:world', not found". `git` because a
+      # container job's checkout falls back to a tarball without it, and the Publish step
+      # below reads `git rev-parse` for the tag. gn, ninja, clang and the Rust toolchain are
+      # downloaded by the crate itself.
       - name: Install build dependencies
-        run: dnf install -y -q glib2-devel
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends \
+            build-essential python3 curl ca-certificates git pkg-config libglib2.0-dev xz-utils
 
       # No rust in this image, and rustup honours the tree's `rust-toolchain.toml`.
       - name: Install Rust

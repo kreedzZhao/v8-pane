@@ -84,8 +84,8 @@ jobs:
       # bindgen's libclang, once on bindgen's builtin headers -- each time discarding a
       # complete V8 build. The cache is keyed loosely on purpose: any hit at all turns the
       # retry from an hour into minutes.
-      - name: Cache ccache
-        uses: actions/cache@v4
+      - name: Restore ccache
+        uses: actions/cache/restore@v4
         with:
           path: /github/home/.cache/ccache
           key: ccache-v8-${{ github.sha }}
@@ -122,17 +122,42 @@ jobs:
           python3 tools/rust_toolchain.py
           ls -l third_party/rust-toolchain/lib/libclang*
           echo "LIBCLANG_PATH=$PWD/third_party/rust-toolchain/lib" >> "$GITHUB_ENV"
-          # A libclang is not a clang: it carries no **resource directory**, so the builtin
-          # headers are missing and `build_binding`'s bindgen dies on
-          # "third_party/libc++/src/include/stddef.h: 'stddef.h' file not found" -- after V8
-          # itself has compiled, 2358 of 2384 targets in, which is the expensive place to
-          # find out. `stddef.h` is a freestanding compiler header, so gcc's copy answers it.
-          echo "BINDGEN_EXTRA_CLANG_ARGS=-I$(ls -d /usr/lib/gcc/x86_64-linux-gnu/*/include | head -1)" >> "$GITHUB_ENV"
+          # **The libclang and the clang are in two different packages**, and `build_binding`
+          # assumes one prefix holds both: it takes `LIBCLANG_PATH`, looks for `../bin/clang`
+          # beside it, and asks that for `-print-resource-dir` to find the builtin headers.
+          # Chromium's Rust toolchain has `bin/bindgen` and no `clang`, so that lookup fails
+          # **silently** and the run dies later on a missing `stddef.h` -- 2358 of 2384
+          # targets in, which is the expensive place to find out. Two attempts were spent on
+          # the wrong end of it: `-I<gcc includes>` supplies the header and puts it *before*
+          # libc++'s, which libc++ then rejects outright ("header search paths are not
+          # configured properly").
+          #
+          # So download the clang package too and hand bindgen its resource directory.
+          # `BINDGEN_EXTRA_CLANG_ARGS` is appended after `build_binding`'s own arguments,
+          # which is the order its comment asks for: libc++ first, clang builtins after.
+          python3 tools/clang/scripts/update.py --output-dir "$PWD/target/release/clang"
+          resource=$("$PWD/target/release/clang/bin/clang" -print-resource-dir)
+          ls -l "$resource/include/stddef.h"
+          echo "BINDGEN_EXTRA_CLANG_ARGS=-isystem$resource/include" >> "$GITHUB_ENV"
 
-      # Build and gate in one step, so that what gets published is what was tested.
-      # `test_pane_apis` is why this fork exists; `test_api` is upstream's own 292 cases,
-      # which is what would catch a patch that builds and breaks V8 somewhere else.
-      - name: Build from source and test
+      - name: Build from source
+        run: V8_FROM_SOURCE=1 cargo build --release -p v8
+
+      # **Saved even when the build failed**, which is the point of it being its own step.
+      # Every failure this job has had came after the compile -- twice in bindgen, once in
+      # the linker -- and `actions/cache` does not save on a failed job, so each retry paid
+      # the hour again. `always()` breaks that loop: whatever compiled stays compiled.
+      - name: Save ccache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: /github/home/.cache/ccache
+          key: ccache-v8-${{ github.sha }}
+
+      # The gate is separate but still before `Publish`, so what gets published is what was
+      # tested. `test_pane_apis` is why this fork exists; `test_api` is upstream's own 292
+      # cases, which is what would catch a patch that builds and breaks V8 somewhere else.
+      - name: Test the archive
         run: |
           V8_FROM_SOURCE=1 cargo test --release --test test_pane_apis
           V8_FROM_SOURCE=1 cargo test --release --test test_api

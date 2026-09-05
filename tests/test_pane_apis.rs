@@ -170,3 +170,88 @@ fn an_undetectable_instance_answers_typeof_undefined_without_being_undefined() {
   global.set(scope, key.into(), plain.into());
   assert_eq!(eval_string(scope, "typeof plain"), "object");
 }
+
+/// `Template::SetLazyDataProperty`, bound here because upstream binds it on `v8::Object`
+/// only, and the two differ in the one thing an embedder cannot fix afterwards:
+/// **position**. An `Object`-level install runs after `Context::New` and appends to the
+/// object's own-property order; a template-level install is part of instantiation.
+///
+/// What instantiation does with it is a property of this tree, so it is pinned here:
+/// `ConfigureInstance` (`v8/src/api/api-natives.cc`) installs a template's accessor group
+/// -- which lazy properties join -- before its `Template::Set` group, and installs that
+/// first group in reverse. An embedder that needs names in a *captured* order therefore
+/// cannot mix the two calls on one template and keep it; what it can rely on, and the
+/// second half asserts, is that the property is not observably lazy: enumeration does not
+/// run the getter, and the unread descriptor is an ordinary data descriptor.
+#[test]
+fn a_template_lazy_property_installs_first_stays_lazy_and_describes_as_data() {
+  initialize_once();
+
+  static RAN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+  fn getter(
+    scope: &mut v8::PinScope<'_, '_>,
+    _key: v8::Local<'_, v8::Name>,
+    _args: v8::PropertyCallbackArguments<'_>,
+    mut rv: v8::ReturnValue<v8::Value>,
+  ) {
+    RAN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let answer = v8::Integer::new(scope, 7);
+    rv.set(answer.into());
+  }
+
+  let isolate = &mut v8::Isolate::new(v8::CreateParams::default());
+  v8::scope!(let scope, isolate);
+
+  // One plain name on either side of the lazy one, so both facts are visible at once:
+  // the lazy name leaves its insertion slot, and the plain group keeps its order.
+  let template = v8::ObjectTemplate::new(scope);
+  for name in ["alpha", "omega"] {
+    let key = v8::String::new(scope, name).expect("a key");
+    let value = v8::Integer::new(scope, 1);
+    if name == "alpha" {
+      template.set_with_attr(key.into(), value.into(), v8::PropertyAttribute::NONE);
+      let lazy_key = v8::String::new(scope, "middle").expect("a key");
+      template.set_lazy_data_property(
+        lazy_key.into(),
+        getter,
+        None,
+        v8::PropertyAttribute::NONE,
+        v8::SideEffectType::HasNoSideEffect,
+        v8::SideEffectType::HasSideEffect,
+      );
+    } else {
+      template.set_with_attr(key.into(), value.into(), v8::PropertyAttribute::NONE);
+    }
+  }
+
+  let context = v8::Context::new(scope, v8::ContextOptions::default());
+  let mut scope = v8::ContextScope::new(scope, context);
+  let scope = &mut scope;
+  let instance = template.new_instance(scope).expect("an instance");
+  let key = v8::String::new(scope, "it").expect("a key");
+  context.global(scope).set(scope, key.into(), instance.into());
+
+  // The grouping rule. If this moves, the embedder's ordering workaround (installing on
+  // the live object instead) may no longer be necessary -- re-derive before relying on it.
+  assert_eq!(
+    eval_string(scope, "JSON.stringify(Object.getOwnPropertyNames(it))"),
+    r#"["middle","alpha","omega"]"#,
+  );
+  assert_eq!(RAN.load(std::sync::atomic::Ordering::SeqCst), 0, "enumeration ran the getter");
+
+  // Unread, it describes as plain data -- `{value}`, not `{get,set}` -- which is what
+  // makes laziness unobservable to one line of script.
+  assert_eq!(
+    eval_string(
+      scope,
+      "JSON.stringify(Object.getOwnPropertyDescriptor(it, 'middle'))",
+    ),
+    r#"{"value":7,"writable":true,"enumerable":true,"configurable":true}"#,
+  );
+  assert_eq!(RAN.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+  // Reading it replaces it with that value; the getter does not run again.
+  assert_eq!(eval_string(scope, "String(it.middle)"), "7");
+  assert_eq!(eval_string(scope, "String(it.middle === it.middle)"), "true");
+  assert_eq!(RAN.load(std::sync::atomic::Ordering::SeqCst), 1, "a second read ran the getter again");
+}

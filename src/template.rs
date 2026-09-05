@@ -51,6 +51,15 @@ unsafe extern "C" {
     intrinsic: Intrinsic,
     attr: PropertyAttribute,
   );
+  fn v8__Template__SetLazyDataProperty(
+    this: *const Template,
+    key: *const Name,
+    getter: AccessorNameGetterCallback,
+    data_or_null: *const Value,
+    attr: PropertyAttribute,
+    getter_side_effect_type: SideEffectType,
+    setter_side_effect_type: SideEffectType,
+  );
 
   fn v8__Signature__New(
     isolate: *mut RealIsolate,
@@ -650,6 +659,45 @@ impl Template {
     attr: PropertyAttribute,
   ) {
     unsafe { v8__Template__Set(self, &*key, &*value, attr) }
+  }
+
+  /// Adds a **lazy** data property to each instance created by this template:
+  /// `getter` runs the first time the property is read and V8 then replaces the
+  /// property with an ordinary data property holding what it returned.
+  ///
+  /// Public V8 API the upstream crate binds on `Object` only. The difference that
+  /// matters is *position*: an `Object::set_lazy_data_property` install can only
+  /// happen once the context exists, so the name lands at the end of the object's
+  /// own-property order, while this one takes the position the template gives it.
+  ///
+  /// An unread property is not observably lazy --
+  /// `Object.getOwnPropertyDescriptor` reports a data descriptor, and enumeration
+  /// (`getOwnPropertyNames`, `Reflect.ownKeys`, `in`, `for`-`in`) does not run the
+  /// getter. `Object.getOwnPropertyDescriptors` on the whole object does run every
+  /// one of them. Measured in
+  /// `crates/pane-core/tests/lazy_global_spike.rs` in the workspace that vendors
+  /// this fork.
+  #[inline(always)]
+  pub fn set_lazy_data_property(
+    &self,
+    key: Local<Name>,
+    getter: impl MapFnTo<AccessorNameGetterCallback>,
+    data: Option<Local<Value>>,
+    attr: PropertyAttribute,
+    getter_side_effect_type: SideEffectType,
+    setter_side_effect_type: SideEffectType,
+  ) {
+    unsafe {
+      v8__Template__SetLazyDataProperty(
+        self,
+        &*key,
+        getter.map_fn_to(),
+        data.map_or_else(null, |p| &*p),
+        attr,
+        getter_side_effect_type,
+        setter_side_effect_type,
+      )
+    }
   }
 
   /// During template instantiation, sets the value with the

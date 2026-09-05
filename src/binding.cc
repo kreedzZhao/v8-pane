@@ -1482,6 +1482,22 @@ void v8__Template__SetIntrinsicDataProperty(const v8::Template& self,
                                                 attr);
 }
 
+// Public V8 API (`include/v8-template.h`, on `v8::Template`) that the upstream
+// crate binds on `v8::Object` only. On a template it is what keeps a lazily
+// installed name in the position the template gives it: an `Object`-level
+// install necessarily happens after `Context::New` and therefore lands at the
+// end of the global's own-property order, and that order is a captured
+// measurement in this workspace.
+void v8__Template__SetLazyDataProperty(
+    const v8::Template& self, const v8::Name& key,
+    v8::AccessorNameGetterCallback getter, const v8::Value* data_or_null,
+    v8::PropertyAttribute attr, v8::SideEffectType getter_side_effect_type,
+    v8::SideEffectType setter_side_effect_type) {
+  ptr_to_local(&self)->SetLazyDataProperty(
+      ptr_to_local(&key), getter, ptr_to_local(data_or_null), attr,
+      getter_side_effect_type, setter_side_effect_type);
+}
+
 const v8::ObjectTemplate* v8__ObjectTemplate__New(
     v8::Isolate* isolate, const v8::FunctionTemplate& templ) {
   return local_to_ptr(v8::ObjectTemplate::New(isolate, ptr_to_local(&templ)));

@@ -104,20 +104,29 @@ jobs:
       # clang and the Rust toolchain are downloaded by the crate itself.
       - name: Install build dependencies
         run: |
-          # **Debian 11 left LTS on 2026-08-31, and this broke five days later.** The image's
-          # default sources still name deb.debian.org, where bullseye-security is mid-removal:
-          # `apt-get update` still gets an index naming `libperl5.32 +deb11u5`, and the pool
-          # file behind it is already gone -- 404 at install, after update succeeded. And the
-          # migration is *half done*: archive.debian.org already serves bullseye's `main`
-          # (Release answers 200) while its debian-security tree does not yet. So the one set
-          # of sources that exists on both sides of the move is the archive's main suite
-          # alone -- and a build container needs no security suite: every package below is in
-          # main, and what this job produces is a static library keyed by commit, not a
-          # served system.
+          # **Debian 11 left LTS on 2026-08-31, and this job broke five days later, twice.**
+          # First as a 404: deb.debian.org's bullseye-security is mid-removal, so update
+          # still handed out an index naming `libperl5.32 +deb11u5` whose pool file was
+          # already gone. Then, pointed at archive.debian.org's `main` alone, as "held
+          # broken packages": the *image's* installed set is at security versions
+          # (libglib2.0-0 2.66.8-1+deb11u8), the archive's main suite stops at the last
+          # point release, and `libglib2.0-dev` requires its runtime at an equal version --
+          # unsatisfiable with no security suite to pull from. (archive.debian.org does not
+          # carry bullseye's debian-security tree yet; the migration is half done.)
           #
-          # Check-Valid-Until off because archived Release files stop being re-signed; on the
-          # day their validity lapses this job should not be the thing that notices.
-          echo 'deb http://archive.debian.org/debian bullseye main' > /etc/apt/sources.list
+          # So the sources are **snapshot.debian.org, pinned to the day this job last
+          # succeeded**. Both suites exist there at versions that agree with the image, and
+          # a dated snapshot cannot be half-removed under this job again. The pin goes
+          # stale on purpose: it describes the container, which is itself pinned to
+          # `debian:bullseye`.
+          #
+          # Check-Valid-Until off because a snapshot's Release files are not re-signed;
+          # their validity window lapsing is not information.
+          SNAP=20260828T000000Z
+          {
+            echo "deb http://snapshot.debian.org/archive/debian/$SNAP bullseye main"
+            echo "deb http://snapshot.debian.org/archive/debian-security/$SNAP bullseye-security main"
+          } > /etc/apt/sources.list
           rm -rf /etc/apt/sources.list.d/*
           apt-get -o Acquire::Check-Valid-Until=false update -qq
           apt-get install -y -qq --no-install-recommends \

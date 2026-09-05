@@ -104,7 +104,22 @@ jobs:
       # clang and the Rust toolchain are downloaded by the crate itself.
       - name: Install build dependencies
         run: |
-          apt-get update -qq
+          # **Debian 11 left LTS on 2026-08-31, and this broke five days later.** The image's
+          # default sources still name deb.debian.org, where bullseye-security is mid-removal:
+          # `apt-get update` still gets an index naming `libperl5.32 +deb11u5`, and the pool
+          # file behind it is already gone -- 404 at install, after update succeeded. And the
+          # migration is *half done*: archive.debian.org already serves bullseye's `main`
+          # (Release answers 200) while its debian-security tree does not yet. So the one set
+          # of sources that exists on both sides of the move is the archive's main suite
+          # alone -- and a build container needs no security suite: every package below is in
+          # main, and what this job produces is a static library keyed by commit, not a
+          # served system.
+          #
+          # Check-Valid-Until off because archived Release files stop being re-signed; on the
+          # day their validity lapses this job should not be the thing that notices.
+          echo 'deb http://archive.debian.org/debian bullseye main' > /etc/apt/sources.list
+          rm -rf /etc/apt/sources.list.d/*
+          apt-get -o Acquire::Check-Valid-Until=false update -qq
           apt-get install -y -qq --no-install-recommends \
             build-essential python3 curl ca-certificates git pkg-config libglib2.0-dev \
             xz-utils ccache

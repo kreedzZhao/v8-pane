@@ -5,6 +5,8 @@ use std::ffi::CString;
 unsafe extern "C" {
   fn icu_get_default_locale(output: *mut char, output_len: usize) -> usize;
   fn icu_set_default_locale(locale: *const char);
+  fn icu_get_default_time_zone(output: *mut char, output_len: usize) -> usize;
+  fn icu_set_default_time_zone(time_zone_id: *const char) -> bool;
   fn udata_setCommonData_78(this: *const u8, error_code: *mut i32);
 }
 
@@ -68,4 +70,45 @@ pub fn set_default_locale(locale: &str) {
     let c_str = CString::new(locale).expect("Invalid locale");
     icu_set_default_locale(c_str.as_ptr());
   }
+}
+
+/// Returns the id of ICU's current default time zone, usually an IANA id such
+/// as `"America/New_York"`. It can also be a custom offset id like
+/// `"GMT+05:00"`, either because one was installed with
+/// [`set_default_time_zone`] or because the host reported its zone that way,
+/// so don't assume the result resolves against the tz database.
+///
+/// If the host time zone could not be determined, ICU reports the special
+/// id `"Etc/Unknown"`, which behaves as GMT.
+pub fn get_default_time_zone() -> String {
+  let mut output = [0u8; 1024];
+  let len = unsafe {
+    icu_get_default_time_zone(output.as_mut_ptr() as *mut char, output.len())
+  };
+  std::str::from_utf8(&output[..len]).unwrap().to_owned()
+}
+
+/// Sets ICU's default time zone from a time zone id (e.g. `"UTC"`,
+/// `"Asia/Manila"`). This makes `Date` resolve the given zone on every
+/// platform, including Windows, where ICU otherwise reads the host time
+/// zone from the OS and ignores the `TZ` environment variable.
+///
+/// Returns `false` — leaving the current default untouched — if `time_zone_id`
+/// is not a time zone id ICU recognizes. Note that ICU's own "unknown zone"
+/// id, `"Etc/Unknown"`, is rejected as well. Besides IANA ids, ICU accepts
+/// custom offset ids such as `"GMT+05:00"`.
+///
+/// This mutates process wide state and is not synchronized with isolates
+/// running on other threads, so it should be called before those isolates
+/// evaluate any code observing the time zone. Afterwards, notify each isolate
+/// via [`crate::Isolate::date_time_configuration_change_notification`] with
+/// [`crate::TimeZoneDetection::Skip`] so cached values are refreshed without
+/// re-detecting (and overwriting) the zone just set here.
+#[must_use]
+pub fn set_default_time_zone(time_zone_id: &str) -> bool {
+  let Ok(c_str) = CString::new(time_zone_id) else {
+    // An interior nul byte can't be a valid time zone id.
+    return false;
+  };
+  unsafe { icu_set_default_time_zone(c_str.as_ptr()) }
 }

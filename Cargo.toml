@@ -12,7 +12,7 @@
 [package]
 edition = "2024"
 name = "v8"
-version = "152.1.0"
+version = "152.2.0"
 authors = ["the Deno authors"]
 build = "build.rs"
 exclude = [

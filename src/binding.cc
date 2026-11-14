@@ -16,6 +16,8 @@
 #include "libplatform/libplatform.h"
 #include "support.h"
 #include "unicode/locid.h"
+#include "unicode/timezone.h"
+#include "unicode/unistr.h"
 #include "v8-callbacks.h"
 #include "v8-cppgc.h"
 #include "v8-fast-api-calls.h"
@@ -333,6 +335,12 @@ void v8__Isolate__SetHostCreateShadowRealmContextCallback(
 void v8__Isolate__SetUseCounterCallback(
     v8::Isolate* isolate, v8::Isolate::UseCounterCallback callback) {
   isolate->SetUseCounterCallback(callback);
+}
+
+void v8__Isolate__SetModifyCodeGenerationFromStringsCallback(
+    v8::Isolate* isolate,
+    v8::ModifyCodeGenerationFromStringsCallback2 callback) {
+  isolate->SetModifyCodeGenerationFromStringsCallback(callback);
 }
 
 bool v8__Isolate__AddMessageListener(v8::Isolate* isolate,
@@ -2870,9 +2878,17 @@ const v8::UnboundScript* v8__Script__GetUnboundScript(
   return local_to_ptr(ptr_to_local(&script)->GetUnboundScript());
 }
 
+int v8__Script__ScriptId(const v8::Script& script) {
+  return ptr_to_local(&script)->ScriptId();
+}
+
 const v8::Script* v8__UnboundScript__BindToCurrentContext(
     const v8::UnboundScript& unbound_script) {
   return local_to_ptr(ptr_to_local(&unbound_script)->BindToCurrentContext());
+}
+
+int v8__UnboundScript__ScriptId(const v8::UnboundScript& unbound_script) {
+  return ptr_to_local(&unbound_script)->ScriptId();
 }
 
 v8::ScriptCompiler::CachedData* v8__UnboundScript__CreateCodeCache(
@@ -3561,6 +3577,27 @@ v8_inspector__V8InspectorSession__wrapObject(
       .release();
 }
 
+bool v8_inspector__V8InspectorSession__unwrapObject(
+    v8_inspector::V8InspectorSession* self, v8_inspector::StringBuffer** error,
+    v8_inspector::StringView object_id, const v8::Value** value,
+    const v8::Context** context, v8_inspector::StringBuffer** object_group) {
+  std::unique_ptr<v8_inspector::StringBuffer> error_buffer;
+  v8::Local<v8::Value> local_value;
+  v8::Local<v8::Context> local_context;
+  std::unique_ptr<v8_inspector::StringBuffer> object_group_buffer;
+  bool success = self->unwrapObject(&error_buffer, object_id, &local_value,
+                                    &local_context, &object_group_buffer);
+  if (!success) {
+    *error = error_buffer.release();
+    return false;
+  }
+
+  *value = local_to_ptr(local_value);
+  *context = local_to_ptr(local_context);
+  *object_group = object_group_buffer.release();
+  return true;
+}
+
 void v8_inspector__RemoteObject__DELETE(
     v8_inspector::protocol::Runtime::API::RemoteObject* self) {
   delete self;
@@ -3885,6 +3922,10 @@ const v8::Value* v8__Module__Evaluate(const v8::Module& self,
 
 bool v8__Module__IsGraphAsync(const v8::Module& self) {
   return ptr_to_local(&self)->IsGraphAsync();
+}
+
+bool v8__Module__HasTopLevelAwait(const v8::Module& self) {
+  return ptr_to_local(&self)->HasTopLevelAwait();
 }
 
 bool v8__Module__IsSourceTextModule(const v8::Module& self) {
@@ -4478,6 +4519,39 @@ size_t icu_get_default_locale(char* output, size_t output_len) {
 void icu_set_default_locale(const char* locale) {
   UErrorCode status = U_ZERO_ERROR;
   icu::Locale::setDefault(icu::Locale(locale), status);
+}
+
+size_t icu_get_default_time_zone(char* output, size_t output_len) {
+  icu::UnicodeString id;
+  std::unique_ptr<icu::TimeZone> tz(icu::TimeZone::createDefault());
+  tz->getID(id);
+  icu::CheckedArrayByteSink sink(output, static_cast<uint32_t>(output_len));
+  id.toUTF8(sink);
+  assert(!sink.Overflowed());
+  // Deliberately not `NumberOfBytesAppended()`: that counts bytes the sink was
+  // asked to write, so on overflow it exceeds `output_len` and the caller would
+  // read past the buffer (the assert above is compiled out in release builds).
+  return sink.NumberOfBytesWritten();
+}
+
+// NOTE: the parameter is deliberately not named `timezone`; glibc's <time.h>
+// declares a global with that name and the build uses -Werror,-Wshadow.
+bool icu_set_default_time_zone(const char* time_zone_id) {
+  // `createTimeZone()` never fails: an id it does not recognize yields the
+  // special "unknown" zone (which behaves as GMT). Detect that and report it
+  // instead of silently installing GMT.
+  std::unique_ptr<icu::TimeZone> tz(icu::TimeZone::createTimeZone(
+      icu::UnicodeString::fromUTF8(time_zone_id)));
+  icu::UnicodeString id;
+  tz->getID(id);
+  if (id == icu::UnicodeString(UCAL_UNKNOWN_ZONE_ID, -1, US_INV)) {
+    return false;
+  }
+  // Takes ownership of the created TimeZone and installs it as the process
+  // wide default, so ICU (and therefore V8's Date implementation) resolves
+  // the given id regardless of how the host reports its time zone.
+  icu::TimeZone::adoptDefault(tz.release());
+  return true;
 }
 
 }  // extern "C"

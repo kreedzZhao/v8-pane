@@ -5400,6 +5400,47 @@ fn module_stalled_top_level_await() {
 }
 
 #[test]
+fn module_has_top_level_await() {
+  let _setup_guard = setup::parallel_test();
+  let isolate = &mut v8::Isolate::new(Default::default());
+  {
+    v8::scope!(let scope, isolate);
+
+    let context = v8::Context::new(scope, Default::default());
+    let scope = &mut v8::ContextScope::new(scope, context);
+    let origin = mock_script_origin(scope, "foo.js");
+
+    // Unlike IsGraphAsync, this is a property of the module alone, so it
+    // answers before the module has been instantiated.
+    let source_text =
+      v8::String::new(scope, "await Promise.resolve();").unwrap();
+    let mut source =
+      v8::script_compiler::Source::new(source_text, Some(&origin));
+    let module =
+      v8::script_compiler::compile_module(scope, &mut source).unwrap();
+    assert_eq!(v8::ModuleStatus::Uninstantiated, module.get_status());
+    assert!(module.has_top_level_await());
+
+    // A module that merely imports one is an async *graph*, but has no
+    // top-level await of its own. The resolve callback compiles the specifier
+    // itself as the dependency's source.
+    let source_text =
+      v8::String::new(scope, "import \"await Promise.resolve();\";").unwrap();
+    let mut source =
+      v8::script_compiler::Source::new(source_text, Some(&origin));
+    let importer =
+      v8::script_compiler::compile_module(scope, &mut source).unwrap();
+    assert!(!importer.has_top_level_await());
+
+    importer
+      .instantiate_module(scope, compile_specifier_as_module_resolve_callback)
+      .unwrap();
+    assert!(importer.is_graph_async());
+    assert!(!importer.has_top_level_await());
+  }
+}
+
+#[test]
 fn import_attributes() {
   let _setup_guard = setup::parallel_test();
   let isolate = &mut v8::Isolate::new(Default::default());
@@ -7365,6 +7406,70 @@ fn inspector_wrap_object() {
     assert!(state.responses[0].contains(r#""name":"answer""#));
     assert!(state.responses[0].contains(r#""value":42"#));
   }
+  inspector.context_destroyed(context);
+}
+
+#[test]
+fn inspector_unwrap_object() {
+  let _setup_guard = setup::parallel_test();
+  let isolate = &mut v8::Isolate::new(Default::default());
+
+  use v8::inspector::*;
+
+  let inspector_client = V8InspectorClient::new(Box::new(ClientCounter::new()));
+  let inspector = V8Inspector::create(isolate, inspector_client);
+
+  v8::scope!(let scope, isolate);
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+
+  let name = StringView::from(&b""[..]);
+  inspector.context_created(context, 1, name, name);
+
+  let session = inspector.connect(
+    1,
+    Channel::new(Box::new(ChannelCounter::new())),
+    StringView::from(&b"{}"[..]),
+    V8InspectorClientTrustLevel::Untrusted,
+  );
+
+  let value = eval(scope, "({ answer: 42 })").unwrap();
+  let remote_object = session
+    .wrap_object(
+      scope,
+      context,
+      value,
+      StringView::from(&b"rusty-v8-test"[..]),
+      false,
+    )
+    .unwrap();
+  let json = String::from_utf8(
+    v8::crdtp::cbor_to_json(&remote_object.to_bytes()).unwrap(),
+  )
+  .unwrap();
+  let object_id = json
+    .split_once(r#""objectId":""#)
+    .unwrap()
+    .1
+    .split_once('"')
+    .unwrap()
+    .0;
+
+  let (unwrapped_value, unwrapped_context, object_group) = session
+    .unwrap_object(scope, StringView::from(object_id.as_bytes()))
+    .unwrap();
+  assert!(unwrapped_value.strict_equals(value));
+  assert_eq!(unwrapped_context, context);
+  assert_eq!(object_group.unwrap().string().to_string(), "rusty-v8-test");
+
+  let error = session
+    .unwrap_object(scope, StringView::from(&b"invalid"[..]))
+    .unwrap_err();
+  assert_eq!(
+    error.unwrap().string().to_string(),
+    "Invalid remote object id"
+  );
+
   inspector.context_destroyed(context);
 }
 
@@ -9965,6 +10070,22 @@ fn wasm_module_compilation_abort() {
 }
 
 #[test]
+fn script_id() {
+  let _setup_guard = setup::parallel_test();
+  let isolate = &mut v8::Isolate::new(Default::default());
+  v8::scope!(let scope, isolate);
+
+  let context = v8::Context::new(scope, Default::default());
+  let scope = &mut v8::ContextScope::new(scope, context);
+  let source = v8::String::new(scope, "1 + 2").unwrap();
+  let script = v8::Script::compile(scope, source, None).unwrap();
+
+  let script_id = script.script_id();
+  assert!(script_id > 0);
+  assert_eq!(script.get_unbound_script(scope).script_id(), script_id);
+}
+
+#[test]
 fn unbound_script_conversion() {
   let _setup_guard = setup::parallel_test();
   let isolate = &mut v8::Isolate::new(Default::default());
@@ -10454,6 +10575,55 @@ fn icu_set_common_data_fail() {
   assert!(
     v8::icu::set_common_data_78(&[1, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0]).is_err()
   );
+}
+
+#[test]
+fn icu_default_time_zone() {
+  // Mutates the process-wide ICU default time zone, which also affects how
+  // other tests' `Date`s render, so take the exclusive lock.
+  let _setup_guard = setup::sequential_test();
+
+  // Restore the original default when the test ends, including on panic, so a
+  // failure here doesn't cascade into every test that renders a `Date`.
+  struct RestoreTimeZone(String);
+  impl Drop for RestoreTimeZone {
+    fn drop(&mut self) {
+      // The host zone may be undetectable ("Etc/Unknown"), which isn't
+      // settable; fall back to UTC rather than leaving the zone we installed.
+      // Deliberately no assert here: this can run while unwinding.
+      if !v8::icu::set_default_time_zone(&self.0) {
+        let _ = v8::icu::set_default_time_zone("UTC");
+      }
+    }
+  }
+  let _restore = RestoreTimeZone(v8::icu::get_default_time_zone());
+
+  // Unknown ids are rejected and leave the current default alone.
+  let before = v8::icu::get_default_time_zone();
+  assert!(!v8::icu::set_default_time_zone("Not/AZone"));
+  assert!(!v8::icu::set_default_time_zone("America/New\0_York"));
+  assert_eq!(v8::icu::get_default_time_zone(), before);
+
+  assert!(v8::icu::set_default_time_zone("UTC"));
+  assert_eq!(v8::icu::get_default_time_zone(), "UTC");
+
+  assert!(v8::icu::set_default_time_zone("America/New_York"));
+  assert_eq!(v8::icu::get_default_time_zone(), "America/New_York");
+
+  let isolate = &mut v8::Isolate::new(Default::default());
+  isolate
+    .date_time_configuration_change_notification(v8::TimeZoneDetection::Skip);
+  {
+    v8::scope!(let scope, isolate);
+    let context = v8::Context::new(scope, Default::default());
+    let scope = &mut v8::ContextScope::new(scope, context);
+    // 2020-06-26T07:00:00Z is 03:00 in America/New_York (EDT, UTC-4).
+    let source = r#"
+      new Date(Date.UTC(2020, 5, 26, 7, 0, 0)).getHours();
+    "#;
+    let value = eval(scope, source).unwrap();
+    assert_eq!(value.number_value(scope).unwrap(), 3.0);
+  }
 }
 
 #[test]
@@ -13224,7 +13394,7 @@ fn microtask_queue() {
   let mut scope = scope.init();
   let context = v8::Context::new(&scope, Default::default());
 
-  let queue = context.get_microtask_queue();
+  let queue = context.get_microtask_queue().unwrap();
   let mut scope = v8::ContextScope::new(&mut scope, context);
 
   static CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -13258,7 +13428,10 @@ fn microtask_queue_new() {
   let context = v8::Context::new(&scope, Default::default());
 
   context.set_microtask_queue(queue.as_ref());
-  assert!(std::ptr::eq(context.get_microtask_queue(), queue.as_ref()));
+  assert!(std::ptr::eq(
+    context.get_microtask_queue().unwrap(),
+    queue.as_ref()
+  ));
 
   let mut scope = v8::ContextScope::new(&mut scope, context);
   static CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -13278,7 +13451,10 @@ fn microtask_queue_new() {
   // released and cppgc runs.
   drop(queue);
   scope.request_garbage_collection_for_testing(v8::GarbageCollectionType::Full);
-  context.get_microtask_queue().perform_checkpoint(&mut scope);
+  context
+    .get_microtask_queue()
+    .unwrap()
+    .perform_checkpoint(&mut scope);
   assert_eq!(CALL_COUNT.load(Ordering::SeqCst), 1);
 }
 
@@ -13673,6 +13849,118 @@ fn use_counter_callback() {
 
   eval(scope, "'use strict'; 1 + 1");
 
+  assert_eq!(COUNT.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn code_generation_from_strings_callback() {
+  static CODEGEN_ALLOWED: AtomicBool = AtomicBool::new(false);
+  static MODIFY_SOURCE: AtomicBool = AtomicBool::new(false);
+  static COUNT: AtomicUsize = AtomicUsize::new(0);
+
+  fn callback<'s, 'i>(
+    scope: &mut v8::PinScope<'s, 'i>,
+    source: v8::Local<'s, v8::Value>,
+    is_code_like: bool,
+  ) -> v8::ModifyCodeGenerationFromStringsResult<'s> {
+    COUNT.fetch_add(1, Ordering::Relaxed);
+    assert!(!is_code_like);
+    assert_eq!(source.to_rust_string_lossy(scope), "1 + 1");
+    let modified_source = if MODIFY_SOURCE.load(Ordering::Relaxed) {
+      Some(v8::String::new(scope, "40 + 2").unwrap())
+    } else {
+      None
+    };
+    v8::ModifyCodeGenerationFromStringsResult {
+      codegen_allowed: CODEGEN_ALLOWED.load(Ordering::Relaxed),
+      modified_source,
+    }
+  }
+
+  let _setup_guard = setup::parallel_test();
+  let mut isolate = v8::Isolate::new(Default::default());
+  isolate.set_modify_code_generation_from_strings_callback(callback);
+  let scope = pin!(v8::HandleScope::new(&mut isolate));
+  let mut scope = scope.init();
+  let context = v8::Context::new(&scope, Default::default());
+  // Must be set to false, otherwise code generation is unconditionally allowed
+  // and the callback is never consulted.
+  context.set_allow_generation_from_strings(false);
+
+  let scope = &mut v8::ContextScope::new(&mut scope, context);
+
+  // Code generation should be disallowed.
+  {
+    let tc = pin!(v8::TryCatch::new(scope));
+    let tc = &mut tc.init();
+    eval(tc, "eval('1 + 1')");
+    assert_eq!(
+      tc.message().unwrap().get(tc).to_rust_string_lossy(tc),
+      "Uncaught EvalError: Code generation from strings disallowed for this context"
+    );
+    assert_eq!(COUNT.load(Ordering::Relaxed), 1);
+  }
+
+  // Enable code generation.
+  CODEGEN_ALLOWED.store(true, Ordering::Relaxed);
+  let result: Option<v8::Local<'_, v8::Value>> = eval(scope, "eval('1 + 1')");
+  assert_eq!(result.unwrap().number_value(scope).unwrap(), 2.0);
+  assert_eq!(COUNT.load(Ordering::Relaxed), 2);
+
+  // Replace the source that is about to be compiled.
+  MODIFY_SOURCE.store(true, Ordering::Relaxed);
+  let result: Option<v8::Local<'_, v8::Value>> = eval(scope, "eval('1 + 1')");
+  assert_eq!(result.unwrap().number_value(scope).unwrap(), 42.0);
+  assert_eq!(COUNT.load(Ordering::Relaxed), 3);
+
+  // `modified_source` is only considered when `codegen_allowed` is true, so
+  // blocking still wins even though the callback hands back a replacement.
+  CODEGEN_ALLOWED.store(false, Ordering::Relaxed);
+  {
+    let tc = pin!(v8::TryCatch::new(scope));
+    let tc = &mut tc.init();
+    eval(tc, "eval('1 + 1')");
+    assert_eq!(
+      tc.message().unwrap().get(tc).to_rust_string_lossy(tc),
+      "Uncaught EvalError: Code generation from strings disallowed for this context"
+    );
+    assert_eq!(COUNT.load(Ordering::Relaxed), 4);
+  }
+}
+
+#[test]
+fn code_generation_from_strings_callback_non_string_source() {
+  static COUNT: AtomicUsize = AtomicUsize::new(0);
+
+  fn callback<'s, 'i>(
+    scope: &mut v8::PinScope<'s, 'i>,
+    source: v8::Local<'s, v8::Value>,
+    is_code_like: bool,
+  ) -> v8::ModifyCodeGenerationFromStringsResult<'s> {
+    COUNT.fetch_add(1, Ordering::Relaxed);
+    // `is_code_like` is only true for objects marked via
+    // `v8::ObjectTemplate::SetCodeLike()`, which rusty_v8 doesn't expose.
+    assert!(!is_code_like);
+    assert!(!source.is_string());
+    v8::ModifyCodeGenerationFromStringsResult {
+      codegen_allowed: true,
+      modified_source: Some(v8::String::new(scope, "40 + 2").unwrap()),
+    }
+  }
+
+  let _setup_guard = setup::parallel_test();
+  let mut isolate = v8::Isolate::new(Default::default());
+  isolate.set_modify_code_generation_from_strings_callback(callback);
+  let scope = pin!(v8::HandleScope::new(&mut isolate));
+  let mut scope = scope.init();
+  let context = v8::Context::new(&scope, Default::default());
+  let scope = &mut v8::ContextScope::new(&mut scope, context);
+
+  // Note that code generation from strings is left *enabled* here. V8 still
+  // consults the callback, because the source is not a string, and the
+  // callback is what turns it into something compilable.
+  let result: Option<v8::Local<'_, v8::Value>> = eval(scope, "eval({})");
+  assert_eq!(result.unwrap().number_value(scope).unwrap(), 42.0);
   assert_eq!(COUNT.load(Ordering::Relaxed), 1);
 }
 

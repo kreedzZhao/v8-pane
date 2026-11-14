@@ -2,7 +2,7 @@
 
 V8 Version: 15.2.124.1
 
-[![ci](https://github.com/denoland/rusty_v8/workflows/ci/badge.svg?branch=main)](https://github.com/denoland/rusty_v8/actions)
+[![ci](https://github.com/denoland/rusty_v8/actions/workflows/ci.yml/badge.svg)](https://github.com/denoland/rusty_v8/actions)
 [![crates](https://img.shields.io/crates/v/v8.svg)](https://crates.io/crates/v8)
 [![docs](https://docs.rs/v8/badge.svg)](https://docs.rs/v8)
 
@@ -69,6 +69,43 @@ Tells the build script where to get binary builds from. Understands `http://`
 and `https://` URLs, and file paths. The default is
 https://github.com/denoland/rusty_v8/releases.
 
+For every artifact (the static lib and the generated `src_binding` file), the
+build script tries an ordered list of locations and uses the first one that
+works:
+
+1. `RUSTY_V8_ARCHIVE` (static lib) or `RUSTY_V8_SRC_BINDING_URL` (binding
+   file), if set; either short-circuits everything else for its artifact.
+2. The mirror, if `RUSTY_V8_MIRROR` is set. A plain base is expanded to
+   `<base>/<tag>/<file>`; a value containing `{` placeholders is treated as a
+   full URL template (see below).
+3. For plain filesystem mirrors only: the flat layout `<base>/<file>`, so a
+   directory of downloaded artifacts works without tag subdirectories.
+4. The upstream GitHub release,
+   `https://github.com/denoland/rusty_v8/releases/download/<tag>/<file>`.
+   With a mirror configured this is only tried when
+   `RUSTY_V8_MIRROR_FALLBACK=1` is set: a mirror fails closed by default and
+   never silently reaches the network.
+
+If every candidate fails, the build script panics with the full list of URLs
+it tried.
+
+`<tag>` defaults to `v<version>` (the crate version). Set
+`RUSTY_V8_MIRROR_TAG` to override it; the value is used verbatim (no `v` is
+prepended), so `RUSTY_V8_MIRROR_TAG=v152.0.0 cargo build` fetches the
+artifacts of the last published release when building a checkout whose
+`Cargo.toml` version is unpublished.
+
+If the `RUSTY_V8_MIRROR` value contains a `{` placeholder, the whole value is
+used as a URL template instead of a base. Supported placeholders: `{tag}`,
+`{version}` (no `v` prefix), `{target}`, `{profile}` (`release`/`debug`),
+`{features}` (e.g. `_ptrcomp`), and `{file}` (the full artifact filename).
+For example:
+
+    export RUSTY_V8_MIRROR=https://example.com/rusty_v8/{version}/{file}
+
+Set `RUSTY_V8_MIRROR_FALLBACK=1` to fall back to the upstream GitHub release
+when the mirror is missing an artifact, e.g. for partially populated caches.
+
 File-based mirrors are good for using cached downloads. First, point the
 environment variable to a suitable location:
 
@@ -82,11 +119,11 @@ Then populate the cache:
 
 # see https://github.com/denoland/rusty_v8/releases
 
-for REL in v0.13.0 v0.12.0; do
+for REL in v152.1.0 v152.0.0; do
   mkdir -p $RUSTY_V8_MIRROR/$REL
   for FILE in \
-    librusty_v8_debug_x86_64-unknown-linux-gnu.a \
-    librusty_v8_release_x86_64-unknown-linux-gnu.a \
+    librusty_v8_release_x86_64-unknown-linux-gnu.a.gz \
+    src_binding_release_x86_64-unknown-linux-gnu.rs \
   ; do
     if [ ! -f $RUSTY_V8_MIRROR/$REL/$FILE ]; then
       wget -O $RUSTY_V8_MIRROR/$REL/$FILE \
@@ -95,6 +132,22 @@ for REL in v0.13.0 v0.12.0; do
   done
 done
 ```
+
+## The `~/.cargo/.rusty_v8` download cache
+
+Before downloading an artifact, the build script looks for a copy in the
+`.rusty_v8` directory inside your Cargo home (usually `~/.cargo/.rusty_v8`).
+Entries are keyed on the release tag plus the artifact filename, with every
+non-alphanumeric character replaced by `_` — for example
+`v152.1.0/librusty_v8_release_x86_64-unknown-linux-gnu.a.gz` becomes
+`v152_1_0_librusty_v8_release_x86_64_unknown_linux_gnu_a_gz`. The escaped
+full source URL, the key used by older versions of the build script, is
+still checked as a fallback, so existing caches keep working.
+
+Because the key does not include the source, a cache entry populated for one
+mirror also satisfies a build configured for a different mirror (or for the
+upstream release) under the same tag. If you need the archive bytes
+themselves verified, pin them with `RUSTY_V8_ARCHIVE_SHA256` (below).
 
 ## The `RUSTY_V8_ARCHIVE` environment variable
 
@@ -105,6 +158,53 @@ path. This is useful when you have a prebuilt archive somewhere:
 export RUSTY_V8_ARCHIVE=/path/to/custom_archive.a
 cargo build
 ```
+
+The value may also name a directory, in which case the expected artifact
+filename (e.g. `librusty_v8_release_x86_64-unknown-linux-gnu.a.gz`, gzipped
+or plain) is looked up inside it. A directory is also the authoritative
+source for the generated `src_binding` file: it is never fetched from the
+mirror or the upstream release, so an offline setup that configured only the
+directory never reaches the network. If the directory lacks the binding, a
+usable binding left on disk by a previous build is reused with a warning;
+otherwise the build fails:
+
+```bash
+export RUSTY_V8_ARCHIVE=/path/to/downloaded/artifacts
+cargo build
+```
+
+Set `RUSTY_V8_ARCHIVE_SHA256` to the SHA-256 of the archive to pin its
+content. A cached or previously downloaded archive that does not match is
+re-fetched, and the build fails if the fresh download does not match either.
+The pin covers the archive bytes as fetched, i.e. what `sha256sum` reports
+on the `.gz` release asset (or on the plain file when the archive is not
+gzipped). Independently of the pin, the build script records the SHA-256 of
+every downloaded artifact and re-fetches it if the file on disk no longer
+matches.
+
+## The `RUSTY_V8_SRC_BINDING_PATH` and `RUSTY_V8_SRC_BINDING_URL` environment variables
+
+The build also needs a generated `src_binding_..._<target>.rs` file, published
+alongside the static library. `RUSTY_V8_SRC_BINDING_PATH` points the build at
+a local binding file that is used directly, with no download at all.
+`RUSTY_V8_SRC_BINDING_URL` instead gives a URL or path to fetch the binding
+from, mirroring what `RUSTY_V8_ARCHIVE` does for the static library. If both
+are set, `RUSTY_V8_SRC_BINDING_PATH` wins.
+
+## The `RUSTY_V8_SKIP_DOWNLOAD` environment variable
+
+Set `RUSTY_V8_SKIP_DOWNLOAD=1` to skip downloading the prebuilt static
+library. The small generated binding file is still fetched, so `cargo check`
+and rust-analyzer work without the (large) prebuilt artifact. Producing a
+binary still requires the static library: `cargo build` fails at link time
+until the crate is built again with the variable unset.
+
+This variable takes precedence over `RUSTY_V8_ARCHIVE` and `RUSTY_V8_MIRROR`
+(the static library is not fetched from anywhere, not even from a local
+archive), and it has no effect on `V8_FROM_SOURCE=1` builds. If the binding
+file cannot be fetched (for example, the configured mirror does not carry it)
+but a previously downloaded binding exists on disk, that file is reused with
+a warning instead of failing the build.
 
 ## Build V8 from Source
 
@@ -127,6 +227,22 @@ Additionally, building from source requires libclang 21.1+ for bindgen:
 sudo apt install libclang-21-dev
 export LIBCLANG_PATH=/usr/lib/llvm-21/lib
 ```
+
+Linux cross-builds normally discover Clang's builtin headers and the target
+libc headers from the host toolchain. For hermetic toolchains where those files
+are not installed in host search paths, set the explicit bindgen inputs:
+
+```bash
+export LIBCLANG_PATH=/path/to/libclang/lib
+export RUSTY_V8_BINDGEN_RESOURCE_DIR=/path/to/lib/clang/21
+export RUSTY_V8_GLIBC_PREFIX=/path/to/aarch64-linux-gnu
+V8_FROM_SOURCE=1 cargo build -vv --target aarch64-unknown-linux-gnu
+```
+
+`RUSTY_V8_BINDGEN_RESOURCE_DIR` takes the directory printed by
+`clang -print-resource-dir`. `RUSTY_V8_GLIBC_PREFIX` takes a GNU target prefix
+whose `include` child contains the target libc headers. Musl cross-builds use
+`RUSTY_V8_MUSL_SYSROOT` instead; it is passed to Clang with `--sysroot`.
 
 For Windows builds: the 64-bit toolchain needs to be used. 32-bit targets are
 not supported. The default source build downloads Chromium's pinned libclang

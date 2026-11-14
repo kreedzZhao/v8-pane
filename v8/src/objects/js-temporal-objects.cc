@@ -2152,8 +2152,8 @@ temporal_rs::TimeZone UTCTimeZone() {
 
 // https://tc39.es/proposal-temporal/#sec-systemtimezoneidentifier
 #ifdef V8_INTL_SUPPORT
-temporal_rs::TimeZone SystemTimeZoneIdentifier() {
-  auto tz_str = Intl::DefaultTimeZone();
+temporal_rs::TimeZone SystemTimeZoneIdentifier(Isolate* isolate) {
+  auto tz_str = Intl::DefaultTimeZone(isolate);
   auto tz = temporal_rs::TimeZone::try_from_identifier_str_with_provider(
                 tz_str, TimeZoneProvider())
                 .ok();
@@ -2163,7 +2163,9 @@ temporal_rs::TimeZone SystemTimeZoneIdentifier() {
   return UTCTimeZone();
 }
 #else   //  V8_INTL_SUPPORT
-temporal_rs::TimeZone SystemTimeZoneIdentifier() { return UTCTimeZone(); }
+temporal_rs::TimeZone SystemTimeZoneIdentifier(Isolate* isolate) {
+  return UTCTimeZone();
+}
 #endif  //  V8_INTL_SUPPORT
 
 // https://tc39.es/proposal-temporal/#sec-temporal-systemutcepochnanoseconds
@@ -2211,7 +2213,7 @@ Maybe<std::unique_ptr<temporal_rs::ZonedDateTime>> GenericTemporalNowISO(
   // 1. If temporalTimeZoneLike is undefined, then
   if (IsUndefined(*temporal_time_zone_like)) {
     // a. Let timeZone be SystemTimeZoneIdentifier().
-    time_zone = SystemTimeZoneIdentifier();
+    time_zone = SystemTimeZoneIdentifier(isolate);
     // 2. Else,
   } else {
     // a. Let timeZone be ? ToTemporalTimeZoneIdentifier(temporalTimeZoneLike).
@@ -7013,7 +7015,7 @@ V8_WARN_UNUSED_RESULT MaybeDirectHandle<String> JSTemporalNowTimeZoneId(
     Isolate* isolate) {
   // 1. Return SystemTimeZoneIdentifier().
 #ifdef V8_INTL_SUPPORT
-  auto tz_str = Intl::DefaultTimeZone();
+  auto tz_str = Intl::DefaultTimeZone(isolate);
 
   IncrementalStringBuilder builder(isolate);
   builder.AppendString(tz_str);

@@ -464,8 +464,20 @@ size_t v8__Isolate__CreateParams__SIZEOF() {
   return sizeof(v8::Isolate::CreateParams);
 }
 
-void v8__Isolate__SetTimeZone(v8::Isolate* isolate, const char* iana_id) {
-  isolate->SetTimeZone(iana_id);
+bool v8__Isolate__SetTimeZone(v8::Isolate* isolate, const char* iana_id) {
+  return isolate->SetTimeZone(iana_id);
+}
+
+// Copies at most `capacity` bytes of the pinned zone's name into `buf` and
+// returns the name's full length, so the caller can size a buffer and ask again.
+// No NUL is written; an empty name means the isolate follows the host's zone.
+size_t v8__Isolate__GetTimeZone(v8::Isolate* isolate, char* buf,
+                                size_t capacity) {
+  std::string name = isolate->GetTimeZone();
+  if (buf != nullptr && capacity != 0) {
+    memcpy(buf, name.data(), std::min(name.size(), capacity));
+  }
+  return name.size();
 }
 
 void v8__Isolate__DateTimeConfigurationChangeNotification(

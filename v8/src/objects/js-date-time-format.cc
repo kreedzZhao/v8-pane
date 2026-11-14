@@ -2763,8 +2763,7 @@ MaybeDirectHandle<JSDateTimeFormat> JSDateTimeFormat::CreateDateTimeFormat(
       // so two isolates disagree and one reports the other's zone.
       tz.reset(isolate->time_zone().empty()
                    ? icu::TimeZone::createDefault()
-                   : icu::TimeZone::createTimeZone(icu::UnicodeString::fromUTF8(
-                         isolate->time_zone())));
+                   : Intl::CreateTimeZoneFromResolvedId(isolate->time_zone()));
     }
   } else {
     // a. If toLocaleStringTimeZone is present, throw a TypeError exception.

@@ -521,7 +521,14 @@ class Intl {
   V8_WARN_UNUSED_RESULT static MaybeHandle<String> TimeZoneIdToString(
       Isolate* isolate, const icu::UnicodeString& id);
   static std::string TimeZoneIdToString(const icu::UnicodeString& id);
-  static std::string DefaultTimeZone();
+  // SystemTimeZoneIdentifier(): the isolate's zone if v8::Isolate::SetTimeZone
+  // pinned one, otherwise the host's.
+  static std::string DefaultTimeZone(Isolate* isolate);
+
+  // Builds the zone an isolate's stored name (v8::Isolate::SetTimeZone) stands
+  // for. The stored name is the one `resolvedOptions().timeZone` reports, which
+  // is an ICU ID except for offsets ("+05:30"). Caller owns the result.
+  static icu::TimeZone* CreateTimeZoneFromResolvedId(const std::string& id);
 
   static icu::number::Notation ToICUNotation(
       Intl::Notation notation, Intl::CompactDisplay compact_display);

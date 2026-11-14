@@ -5,7 +5,7 @@ upstream does not have. Upstream's own README follows below, unchanged.
 
 | | |
 |---|---|
-| `v8::Isolate::SetTimeZone` | a time zone that belongs to the isolate rather than to the process |
+| `v8::Isolate::SetTimeZone` / `GetTimeZone` | a time zone that belongs to the isolate rather than to the process; a name is accepted exactly when `Intl.DateTimeFormat`'s `timeZone` option would accept it, and stored as `resolvedOptions().timeZone` reports it |
 | `v8::ObjectTemplate::MarkAsUndetectable` | public V8 API the crate simply does not bind |
 
 **An isolate that never calls `SetTimeZone` behaves exactly as before**, in both

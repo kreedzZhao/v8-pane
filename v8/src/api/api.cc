@@ -171,6 +171,8 @@
 
 #ifdef V8_INTL_SUPPORT
 #include "src/objects/intl-objects.h"
+#include "src/objects/js-date-time-format.h"
+#include "unicode/timezone.h"
 #endif  // V8_INTL_SUPPORT
 
 #include "src/strings/string-hasher-inl.h"
@@ -11240,10 +11242,54 @@ void v8::Isolate::DateTimeConfigurationChangeNotification(
 #endif  // V8_INTL_SUPPORT
 }
 
-void v8::Isolate::SetTimeZone(const char* iana_id) {
+bool v8::Isolate::SetTimeZone(const char* iana_id) {
   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(this);
   EnterV8NoScriptNoExceptionScope api_scope(i_isolate);
-  i_isolate->set_time_zone(iana_id == nullptr ? "" : iana_id);
+  std::string resolved;
+  if (iana_id != nullptr && *iana_id != '\0') {
+#ifdef V8_INTL_SUPPORT
+    // Validate before touching anything, so a refused name leaves the isolate
+    // exactly as it was. Not a rule of our own: this is the path
+    // `new Intl.DateTimeFormat(undefined, {timeZone: id})` takes --
+    // JSDateTimeFormat::CreateTimeZone for acceptance (offset strings, ASCII
+    // case-insensitive names, IsValidTimeZoneName), JSDateTimeFormat::TimeZoneId
+    // for the name `resolvedOptions().timeZone` then reports. Whatever that
+    // constructor accepts or refuses, this does too.
+    i::HandleScope handle_scope(i_isolate);
+    i::Handle<i::String> name;
+    if (!i_isolate->factory()
+             ->NewStringFromUtf8(v8::base::CStrVector(iana_id))
+             .ToHandle(&name)) {
+      return false;
+    }
+    std::unique_ptr<icu::TimeZone> tz =
+        i::JSDateTimeFormat::CreateTimeZone(i_isolate, name);
+    if (!tz) return false;
+    i::DirectHandle<i::Object> id =
+        i::JSDateTimeFormat::TimeZoneId(i_isolate, *tz);
+    if (!i::IsString(*id)) return false;
+    resolved = i::Cast<i::String>(*id)->ToStdString();
+    // The three places that build this isolate's zone build it from the stored
+    // name (Intl::CreateTimeZoneFromResolvedId), so the stored name has to come
+    // back as the same zone. It does for every name CreateTimeZone produces;
+    // checked rather than assumed, because the failure would be silent -- an
+    // isolate pinned to "Etc/Unknown" while claiming another name.
+    std::unique_ptr<icu::TimeZone> again(
+        i::Intl::CreateTimeZoneFromResolvedId(resolved));
+    i::DirectHandle<i::Object> again_id =
+        i::JSDateTimeFormat::TimeZoneId(i_isolate, *again);
+    if (!i::IsString(*again_id) ||
+        i::Cast<i::String>(*again_id)->ToStdString() != resolved) {
+      return false;
+    }
+#else
+    // Without ICU there is no zone database to resolve a name against, and the
+    // non-ICU timezone caches cannot be pinned (TimezoneCache::SetTimeZone is a
+    // no-op there). Refusing beats claiming a zone the isolate does not have.
+    return false;
+#endif  // V8_INTL_SUPPORT
+  }
+  i_isolate->set_time_zone(resolved);
   // Push it into the cache `Date` reads, then invalidate everything computed
   // under the old zone -- the same set DateTimeConfigurationChangeNotification
   // invalidates, because the same things are stale.
@@ -11257,6 +11303,12 @@ void v8::Isolate::SetTimeZone(const char* iana_id) {
   i_isolate->clear_cached_icu_object(
       i::Isolate::ICUObjectCacheType::kDefaultSimpleDateFormatForDate);
 #endif  // V8_INTL_SUPPORT
+  return true;
+}
+
+std::string v8::Isolate::GetTimeZone() {
+  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(this);
+  return i_isolate->time_zone();
 }
 
 void v8::Isolate::LocaleConfigurationChangeNotification() {

@@ -2790,8 +2790,7 @@ icu::TimeZone* ICUTimezoneCache::GetTimeZone() {
     // The pinned zone if this isolate has one, and only otherwise the process's.
     timezone_ = zone_id_.empty()
                     ? icu::TimeZone::createDefault()
-                    : icu::TimeZone::createTimeZone(
-                          icu::UnicodeString::fromUTF8(zone_id_));
+                    : Intl::CreateTimeZoneFromResolvedId(zone_id_);
   }
   return timezone_;
 }
@@ -3168,17 +3167,28 @@ std::string Intl::TimeZoneIdToString(const icu::UnicodeString& id) {
   return result;
 }
 
-std::string Intl::DefaultTimeZone() {
+icu::TimeZone* Intl::CreateTimeZoneFromResolvedId(const std::string& id) {
+  // Every resolved name is an ICU zone ID as it stands except an offset, which
+  // TimeZoneIdToString reported without the "GMT" prefix ICU's custom-zone
+  // syntax needs: "+05:30" is ICU's "GMT+05:30".
+  if (!id.empty() && (id[0] == '+' || id[0] == '-')) {
+    return icu::TimeZone::createTimeZone(
+        icu::UnicodeString::fromUTF8("GMT" + id));
+  }
+  return icu::TimeZone::createTimeZone(icu::UnicodeString::fromUTF8(id));
+}
+
+std::string Intl::DefaultTimeZone(Isolate* isolate) {
   icu::UnicodeString id;
   {
-    // Static, so the isolate has to be asked for rather than passed. Temporal is
-    // the only caller; going through the current isolate is what keeps it
-    // agreeing with `Date` and `Intl.DateTimeFormat` in the same isolate.
-    Isolate* isolate = Isolate::TryGetCurrent();
+    // The isolate's own zone if it has one: what keeps Temporal agreeing with
+    // `Date` and `Intl.DateTimeFormat` in the same isolate. Passed in rather than
+    // taken from Isolate::TryGetCurrent(), which is a thread-local -- right only
+    // as long as every caller runs inside the isolate it means, which nothing
+    // here would check.
     std::unique_ptr<icu::TimeZone> tz(
-        (isolate != nullptr && !isolate->time_zone().empty())
-            ? icu::TimeZone::createTimeZone(
-                  icu::UnicodeString::fromUTF8(isolate->time_zone()))
+        !isolate->time_zone().empty()
+            ? CreateTimeZoneFromResolvedId(isolate->time_zone())
             : icu::TimeZone::createDefault());
     tz->getID(id);
   }

@@ -1864,8 +1864,25 @@ class V8_EXPORT Isolate {
    *
    * Takes effect immediately; cached date computations are reset the way
    * DateTimeConfigurationChangeNotification resets them.
+   *
+   * **Accepts exactly what `new Intl.DateTimeFormat(undefined, {timeZone: id})`
+   * accepts**, because it is the same code: the name goes through
+   * JSDateTimeFormat::CreateTimeZone (offsets such as "+05:30", case-insensitive
+   * IANA names, "GMT" and "Etc/UTC" as UTC), and what the isolate stores is the
+   * name that formatter's `resolvedOptions().timeZone` would report for it. That
+   * stored name is what GetTimeZone() returns.
+   *
+   * Returns false, and changes nothing, for a name that constructor would reject
+   * with a RangeError. Passing nullptr or "" always succeeds.
    */
-  void SetTimeZone(const char* iana_id);
+  bool SetTimeZone(const char* iana_id);
+
+  /**
+   * The zone SetTimeZone pinned this isolate to, as the canonical name
+   * `Intl.DateTimeFormat().resolvedOptions().timeZone` reports for it, or an
+   * empty string if the isolate follows the host's.
+   */
+  std::string GetTimeZone();
 
   /**
    * Notification that the embedder has changed the locale. V8 keeps a cache of

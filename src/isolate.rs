@@ -847,7 +847,12 @@ unsafe extern "C" {
   fn v8__Isolate__SetTimeZone(
     isolate: *mut RealIsolate,
     iana_id: *const std::ffi::c_char,
-  );
+  ) -> bool;
+  fn v8__Isolate__GetTimeZone(
+    isolate: *mut RealIsolate,
+    buf: *mut u8,
+    capacity: usize,
+  ) -> usize;
   fn v8__Isolate__DateTimeConfigurationChangeNotification(
     isolate: *mut RealIsolate,
     time_zone_detection: TimeZoneDetection,
@@ -2046,15 +2051,21 @@ impl Isolate {
   /// one isolate reports another's zone through one surface and its own through
   /// the other.
   ///
-  /// An identifier V8 does not recognise resolves to UTC, which is ICU's own
-  /// behaviour for an unknown zone. One containing a NUL is refused rather than
-  /// truncated: truncating pins the isolate to a zone the caller did not name.
+  /// Returns whether the zone was taken. A name is accepted exactly when
+  /// `new Intl.DateTimeFormat(undefined, {timeZone: name})` would accept it --
+  /// the same V8 code decides -- so offsets (`"+05:30"`), any ASCII casing of an
+  /// IANA name, and aliases are taken, and the isolate stores the name that
+  /// formatter's `resolvedOptions().timeZone` reports (see [`Self::time_zone`]).
+  /// A name it would reject with a `RangeError` returns `false` and leaves the
+  /// isolate's zone, and everything cached under it, as it was. So does a name
+  /// containing a NUL, which is refused rather than truncated: truncating pins
+  /// the isolate to a zone the caller did not name. `None` always succeeds.
   #[inline(always)]
-  pub fn set_time_zone(&mut self, iana_id: Option<&str>) {
+  pub fn set_time_zone(&mut self, iana_id: Option<&str>) -> bool {
     match iana_id {
       Some(id) => {
         let Ok(id) = std::ffi::CString::new(id) else {
-          return;
+          return false;
         };
         unsafe { v8__Isolate__SetTimeZone(self.as_real_ptr(), id.as_ptr()) }
       }
@@ -2062,6 +2073,27 @@ impl Isolate {
         v8__Isolate__SetTimeZone(self.as_real_ptr(), std::ptr::null())
       },
     }
+  }
+
+  /// The zone [`Self::set_time_zone`] pinned this isolate to, as the canonical
+  /// name `Intl.DateTimeFormat().resolvedOptions().timeZone` reports for it
+  /// (`"asia/tokyo"` comes back as `"Asia/Tokyo"`), or `None` if the isolate
+  /// follows the host's zone.
+  pub fn time_zone(&self) -> Option<std::string::String> {
+    let ptr = self.as_real_ptr();
+    let len = unsafe { v8__Isolate__GetTimeZone(ptr, std::ptr::null_mut(), 0) };
+    if len == 0 {
+      return None;
+    }
+    let mut buf = vec![0u8; len];
+    let written =
+      unsafe { v8__Isolate__GetTimeZone(ptr, buf.as_mut_ptr(), buf.len()) };
+    debug_assert_eq!(written, len);
+    // V8 builds the name from an ICU zone ID, which is ASCII; lossy only so a
+    // surprise cannot become a panic.
+    Some(std::string::String::from_utf8(buf).unwrap_or_else(|e| {
+      std::string::String::from_utf8_lossy(e.as_bytes()).into_owned()
+    }))
   }
 
   /// Returns true if there is ongoing background work within V8 that will

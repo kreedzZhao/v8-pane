@@ -1,6 +1,6 @@
 # v8-pane — rusty_v8 with a per-isolate time zone
 
-A fork of the published `v8` crate (152.1.0, V8 15.2.124.1), carrying two things
+A fork of the published `v8` crate (152.2.0, V8 15.2.124.1), carrying two things
 upstream does not have. Upstream's own README follows below, unchanged.
 
 | | |

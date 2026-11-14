@@ -414,7 +414,7 @@ jobs:
           # (`v8-patch/fetch-archive.sh`: `${FORK_SHA:0:8}`). They agree today by luck. The day
           # a prefix collides they would disagree, and the symptom would be a release nobody
           # can find rather than anything about V8.
-          TAG="v8-152.1.0-${GITHUB_SHA:0:8}"
+          TAG="v8-152.2.0-${GITHUB_SHA:0:8}"
 
           # What actually arrived. Empty means both builds failed, and saying so beats
           # publishing an empty release for a commit the consumer will then ask assets of.

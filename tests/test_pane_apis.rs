@@ -64,8 +64,224 @@ fn eval_string(scope: &mut v8::PinScope, source: &str) -> String {
 
 fn isolate_in(zone: &str) -> v8::OwnedIsolate {
   let mut isolate = v8::Isolate::new(v8::CreateParams::default());
-  isolate.set_time_zone(Some(zone));
+  assert!(isolate.set_time_zone(Some(zone)), "{zone} was refused");
   isolate
+}
+
+/// One expression, evaluated in a fresh context of `isolate`, entered and exited around
+/// it so that several isolates can take turns on one thread.
+fn eval_in(isolate: &mut v8::OwnedIsolate, source: &str) -> String {
+  unsafe { isolate.enter() };
+  let answer = {
+    v8::scope!(let scope, isolate);
+    let context = v8::Context::new(scope, v8::ContextOptions::default());
+    let mut scope = v8::ContextScope::new(scope, context);
+    eval_string(&mut scope, source)
+  };
+  unsafe { isolate.exit() };
+  answer
+}
+
+/// The zone as all three surfaces a page reads it through report it: the name `Intl`
+/// resolves with no `timeZone` option, the minutes behind UTC `Date` reports on January
+/// 15th, and `Temporal.Now.timeZoneId()`. Each reaches the zone by its own road -- ICU
+/// formatter, the isolate's `DateCache`, `Intl::DefaultTimeZone` -- so agreeing is not
+/// automatic.
+fn three(isolate: &mut v8::OwnedIsolate) -> [String; 3] {
+  let joined = eval_in(
+    isolate,
+    "[Intl.DateTimeFormat().resolvedOptions().timeZone, \
+      String(new Date(Date.UTC(2026, 0, 15, 12)).getTimezoneOffset()), \
+      Temporal.Now.timeZoneId()].join('|')",
+  );
+  let parts: Vec<String> = joined.split('|').map(str::to_owned).collect();
+  parts.try_into().expect("three fields")
+}
+
+/// What a page would get from `new Intl.DateTimeFormat(undefined, {timeZone: name})`:
+/// `None` for a `RangeError`, otherwise the name `resolvedOptions()` reports and the
+/// minutes behind UTC on January 15th (read from `longOffset`, so through the formatter
+/// rather than through `Date`). This is the oracle `set_time_zone` is held to.
+fn intl_would_say(
+  isolate: &mut v8::OwnedIsolate,
+  name: &str,
+) -> Option<(String, String)> {
+  // Debug-quoting is a valid JS string literal for the ASCII names used here.
+  let source = format!(
+    r#"(() => {{
+      const name = {name:?};
+      let f;
+      try {{ f = new Intl.DateTimeFormat(undefined, {{timeZone: name}}); }}
+      catch (e) {{ return e instanceof RangeError ? "RangeError" : "other: " + e; }}
+      const part = new Intl.DateTimeFormat("en-US", {{timeZone: name, timeZoneName: "longOffset"}})
+        .formatToParts(new Date(Date.UTC(2026, 0, 15, 12)))
+        .find(p => p.type === "timeZoneName").value;
+      const m = /^GMT(?:([+−-])(\d\d):(\d\d))?$/.exec(part);
+      const east = m[1] ? (m[1] === "+" ? 1 : -1) * (Number(m[2]) * 60 + Number(m[3])) : 0;
+      return f.resolvedOptions().timeZone + "|" + String(-east);
+    }})()"#
+  );
+  let answer = eval_in(isolate, &source);
+  if answer == "RangeError" {
+    return None;
+  }
+  let (zone, offset) = answer
+    .split_once('|')
+    .unwrap_or_else(|| panic!("{name}: the oracle answered {answer}"));
+  Some((zone.to_owned(), offset.to_owned()))
+}
+
+/// `set_time_zone` accepts what `Intl.DateTimeFormat`'s `timeZone` option accepts, refuses
+/// what it refuses, and stores the name `resolvedOptions().timeZone` reports -- because the
+/// same V8 code decides both. The middle column is the observed V8 behaviour, pinned so a
+/// roll that changes it is noticed; the oracle column is asked of V8 at run time, so a
+/// mismatch between the two says which one moved.
+#[test]
+fn set_time_zone_accepts_and_names_zones_the_way_intl_does() {
+  initialize_once();
+
+  let cases: &[(&str, Option<&str>)] = &[
+    ("Asia/Tokyo", Some("Asia/Tokyo")),
+    // ASCII case-insensitive, stored in canonical case.
+    ("asia/tokyo", Some("Asia/Tokyo")),
+    ("AMERICA/NEW_YORK", Some("America/New_York")),
+    // Aliases resolve the way ICU's canonical-ID table resolves them.
+    ("Asia/Calcutta", Some("Asia/Calcutta")),
+    ("Asia/Kolkata", Some("Asia/Calcutta")),
+    ("EST5EDT", Some("America/New_York")),
+    // The UTC family.
+    ("UTC", Some("UTC")),
+    ("utc", Some("UTC")),
+    ("GMT", Some("UTC")),
+    ("Etc/GMT", Some("UTC")),
+    ("Etc/GMT+5", Some("Etc/GMT+5")),
+    // Offset strings, as ECMA-402 allows them.
+    ("+05:30", Some("+05:30")),
+    ("-0800", Some("-08:00")),
+    // Refused.
+    ("Foo/Bar", None),
+    ("UTC+5", None),
+    ("GMT+5", None),
+    ("+24:00", None),
+    (" Asia/Tokyo", None),
+  ];
+
+  let mut table = Vec::new();
+  for &(name, expected) in cases {
+    // Start from a pinned zone, so "refused" can be told apart from "pinned to UTC".
+    let mut isolate = isolate_in("Pacific/Chatham");
+    let before = three(&mut isolate);
+    let oracle = intl_would_say(&mut isolate, name);
+    let took = isolate.set_time_zone(Some(name));
+    let stored = isolate.time_zone();
+    let after = three(&mut isolate);
+    table.push(format!(
+      "{name:>18} -> {took:5} stored={stored:?} surfaces={after:?} intl={oracle:?}"
+    ));
+
+    assert_eq!(
+      took,
+      oracle.is_some(),
+      "{name}: set_time_zone and Intl.DateTimeFormat disagree about accepting it"
+    );
+    assert_eq!(
+      stored.as_deref(),
+      Some(expected.unwrap_or("Pacific/Chatham")),
+      "{name}: stored name"
+    );
+    match oracle {
+      Some((zone, offset)) => {
+        assert_eq!(Some(zone.as_str()), expected, "{name}: Intl's own answer moved");
+        assert_eq!(
+          after,
+          [zone.clone(), offset, zone],
+          "{name}: the three surfaces do not all say the zone Intl resolves the name to"
+        );
+      }
+      None => {
+        assert_eq!(expected, None, "{name}: Intl now refuses it");
+        assert_eq!(after, before, "{name}: a refused name moved the isolate");
+      }
+    }
+  }
+  eprintln!("{}", table.join("\n"));
+}
+
+/// A refused name leaves the isolate exactly where it was -- pinned or not -- on all three
+/// surfaces, and `None` takes a pinned isolate back to the host's zone.
+#[test]
+fn a_refused_zone_changes_nothing_and_none_goes_back_to_the_host() {
+  initialize_once();
+
+  let mut host = v8::Isolate::new(v8::CreateParams::default());
+  let host_zone = three(&mut host);
+  assert_eq!(host.time_zone(), None);
+
+  let refused = ["Foo/Bar", "UTC+5", "Asia/Tokyo\0Europe/London", "\0"];
+
+  // Pinned: a refusal keeps the pin.
+  let mut pinned = isolate_in("Pacific/Chatham");
+  let chatham = three(&mut pinned);
+  assert_eq!(
+    chatham,
+    ["Pacific/Chatham".to_owned(), "-825".to_owned(), "Pacific/Chatham".to_owned()]
+  );
+  for name in refused {
+    assert!(!pinned.set_time_zone(Some(name)), "{name:?} was accepted");
+    assert_eq!(pinned.time_zone().as_deref(), Some("Pacific/Chatham"), "{name:?}");
+    assert_eq!(three(&mut pinned), chatham, "{name:?} moved a pinned isolate");
+  }
+
+  // Unpinned: a refusal does not pin it to anything, UTC included.
+  for name in refused {
+    assert!(!host.set_time_zone(Some(name)), "{name:?} was accepted");
+    assert_eq!(host.time_zone(), None, "{name:?}");
+    assert_eq!(three(&mut host), host_zone, "{name:?} moved an unpinned isolate");
+  }
+
+  // `None` and the empty string both mean the host's zone, and both succeed.
+  assert!(pinned.set_time_zone(None));
+  assert_eq!(pinned.time_zone(), None);
+  assert_eq!(three(&mut pinned), host_zone);
+  assert!(pinned.set_time_zone(Some("Asia/Tokyo")));
+  assert_eq!(
+    three(&mut pinned),
+    ["Asia/Tokyo".to_owned(), "-540".to_owned(), "Asia/Tokyo".to_owned()]
+  );
+  assert!(pinned.set_time_zone(Some("")));
+  assert_eq!(pinned.time_zone(), None);
+  assert_eq!(three(&mut pinned), host_zone);
+}
+
+/// Two isolates on two threads, each pinned to its own zone and reading it in lockstep with
+/// the other, so every read of one falls between reads of the other. Neither ever reports
+/// the other's zone on any surface, and an unpinned isolate on a third thread keeps the host's.
+#[test]
+fn isolates_on_two_threads_keep_their_own_zones_while_interleaved() {
+  initialize_once();
+
+  let mut host = v8::Isolate::new(v8::CreateParams::default());
+  let host_zone = three(&mut host);
+
+  const ROUNDS: usize = 25;
+  let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+  let spawn = |zone: &'static str, offset: &'static str| {
+    let barrier = barrier.clone();
+    std::thread::spawn(move || {
+      let mut isolate = isolate_in(zone);
+      let want = [zone.to_owned(), offset.to_owned(), zone.to_owned()];
+      for round in 0..ROUNDS {
+        barrier.wait();
+        assert_eq!(three(&mut isolate), want, "{zone}, round {round}");
+      }
+    })
+  };
+  let a = spawn("Pacific/Chatham", "-825");
+  let b = spawn("America/New_York", "300");
+  a.join().expect("the Chatham thread");
+  b.join().expect("the New York thread");
+
+  assert_eq!(three(&mut host), host_zone, "an unpinned isolate moved");
 }
 
 /// Why this API exists at all: upstream's only lever is the *process's* zone plus a
